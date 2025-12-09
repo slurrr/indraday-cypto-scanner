@@ -13,6 +13,7 @@ from config.settings import (
 )
 import pandas as pd
 import numpy as np
+import time
 
 class Analyzer:
     def analyze(self, symbol: str, candles: List[Candle]) -> List[Alert]:
@@ -285,8 +286,10 @@ class Analyzer:
         return min(100.0, score)
 
     def _create_alert(self, symbol: str, pattern: PatternType, regime: FlowRegime, candle: Candle, score: float) -> Alert:
+        # Use current system time to show exactly when the alert was fired (e.g. HH:MM:SS)
+        # instead of the candle open time which is always HH:MM:00
         return Alert(
-            timestamp=candle.timestamp,
+            timestamp=int(time.time() * 1000),
             symbol=symbol,
             pattern=pattern,
             score=score,

@@ -45,6 +45,20 @@ def main():
 
     # Setup Binance Client
     client = BinanceClient(SYMBOLS, on_trade_callback=on_trade)
+    
+    # Initialize History
+    try:
+        history_map = client.fetch_historical_candles(lookback_minutes=1000)
+        data_processor.init_history(history_map)
+        
+        # Pre-calculate indicators for history so we start hot
+        for symbol in SYMBOLS:
+            hist = data_processor.get_history(symbol)
+            if hist:
+                update_indicators(hist)
+    except Exception as e:
+        logger.error(f"Failed to initialize history: {e}")
+
     client.start()
 
     # Graceful Shutdown

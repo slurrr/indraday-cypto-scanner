@@ -4,8 +4,9 @@ import time
 import websocket
 from typing import Callable, List, Dict
 from config.settings import BINANCE_SPOT_WS_URL, BINANCE_PERP_WS_URL
-from models.types import Trade
+from models.types import Trade, Candle
 from utils.logger import setup_logger
+import requests
 
 logger = setup_logger("BinanceClient")
 
@@ -67,6 +68,52 @@ class BinanceClient:
         }
         ws.send(json.dumps(subscribe_msg))
         logger.info(f"Subscribed to {len(self.symbols)} symbols")
+
+    def fetch_historical_candles(self, lookback_minutes: int = 1000) -> Dict[str, List[Candle]]:
+        """
+        Fetch historical klines for all symbols via REST API to initialize history.
+        Uses Binance Spot API.
+        """
+        history = {}
+        logger.info(f"Fetching {lookback_minutes} minutes of history for {len(self.symbols)} symbols...")
+        
+        base_url = "https://api.binance.com/api/v3/klines"
+        
+        for symbol in self.symbols:
+            try:
+                # Interval 1m, Limit = lookback
+                params = {
+                    "symbol": symbol.upper(),
+                    "interval": "1m",
+                    "limit": lookback_minutes
+                }
+                resp = requests.get(base_url, params=params, timeout=10)
+                resp.raise_for_status()
+                data = resp.json()
+                
+                candles = []
+                for k in data:
+                    # k schema: [Open time, Open, High, Low, Close, Volume, Close time, ...]
+                    c = Candle(
+                        symbol=symbol,
+                        timestamp=k[0],
+                        open=float(k[1]),
+                        high=float(k[2]),
+                        low=float(k[3]),
+                        close=float(k[4]),
+                        volume=float(k[5]),
+                        spot_cvd=0.0,
+                        perp_cvd=0.0,
+                        closed=True
+                    )
+                    candles.append(c)
+                
+                history[symbol] = candles
+                
+            except Exception as e:
+                logger.error(f"Failed to fetch history for {symbol}: {e}")
+                
+        return history
 
     def start(self):
         """Start spot and perp connections in separate threads"""

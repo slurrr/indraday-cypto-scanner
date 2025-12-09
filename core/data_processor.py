@@ -83,3 +83,12 @@ class DataProcessor:
 
     def get_history(self, symbol: str) -> List[Candle]:
         return self.history.get(symbol, [])
+
+    def init_history(self, history: Dict[str, List[Candle]]):
+        """Initialize history with fetched candles"""
+        self.history = history
+        # Also initialize active_candles based on last history candle if needed?
+        # Actually, active_candle is for the *current* minute being built.
+        # History contains *closed* candles.
+        # So we just populate self.history.
+        logger.info(f"Initialized history for {len(history)} symbols")
