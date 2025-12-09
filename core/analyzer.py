@@ -245,7 +245,7 @@ class Analyzer:
         # Failed Breakout has WEAK / NO flow backing.
         # e.g. Price breaks out, but flow remains Neutral or very weak, indicating no conviction.
         
-        is_weak_flow = regime == FlowRegime.NEUTRAL or regime == FlowRegime.BULLISH_CONSENSUS or regime == FlowRegime.BEARISH_CONSENSUS
+        is_weak_flow = regime == FlowRegime.NEUTRAL
         
         # Refinement: If it's CONSENSUS, it might be a real breakout that just wicked.
         # Failed breakout usually lacks the EXPLOSIVE flow of a real breakout.

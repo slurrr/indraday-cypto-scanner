@@ -32,3 +32,5 @@ wheels/
 
 # Logs
 *.log
+
+test*
