@@ -28,10 +28,12 @@ class ConsoleUI:
         for alert in self.alerts:
             # Color code regime
             regime_style = "white"
-            if alert.flow_regime == FlowRegime.CONSENSUS:
+            if alert.flow_regime == FlowRegime.BULLISH_CONSENSUS:
                 regime_style = "bold green"
+            elif alert.flow_regime == FlowRegime.BEARISH_CONSENSUS:
+                regime_style = "bold red"
             elif alert.flow_regime == FlowRegime.CONFLICT:
-                regime_style = "red"
+                regime_style = "yellow"
                 
             # Format time: Milliseconds -> UTC -> Denver
             ts = pd.to_datetime(alert.timestamp, unit='ms').tz_localize('UTC').tz_convert('America/Denver')
