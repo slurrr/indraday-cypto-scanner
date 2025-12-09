@@ -4,7 +4,8 @@ from typing import List, Optional
 from datetime import datetime
 
 class FlowRegime(str, Enum):
-    CONSENSUS = "FLOW_CONSENSUS"
+    BULLISH_CONSENSUS = "FLOW_BULLISH"
+    BEARISH_CONSENSUS = "FLOW_BEARISH"
     PERP_DOMINANT = "FLOW_PERP_DOMINANT"
     SPOT_DOMINANT = "FLOW_SPOT_DOMINANT"
     CONFLICT = "FLOW_CONFLICT"

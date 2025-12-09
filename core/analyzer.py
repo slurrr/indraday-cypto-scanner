@@ -1,6 +1,16 @@
 from typing import List, Optional
 from models.types import Candle, FlowRegime, PatternType, Alert
-from config.settings import MIN_ATR_PERCENTILE
+from config.settings import (
+    MIN_ATR_PERCENTILE, 
+    FLOW_SLOPE_THRESHOLD,
+    IMPULSE_THRESHOLD_ATR,
+    IGNITION_EXPANSION_THRESHOLD_ATR,
+    PULLBACK_COMPRESSION_THRESHOLD_ATR,
+    PULLBACK_VWAP_DISTANCE_ATR,
+    SESSION_LOOKBACK_WINDOW,
+    MIN_ALERT_SCORE,
+    SCORING_WEIGHTS
+)
 import pandas as pd
 import numpy as np
 
@@ -21,25 +31,25 @@ class Analyzer:
         # A. VWAP Reclaim
         if self._check_vwap_reclaim(candles, regime):
             score = self._calculate_score(PatternType.VWAP_RECLAIM, candles, regime)
-            if score >= 50:
+            if score >= MIN_ALERT_SCORE:
                 alerts.append(self._create_alert(symbol, PatternType.VWAP_RECLAIM, regime, current_candle, score))
             
         # B. Ignition
         if self._check_ignition(candles, regime):
             score = self._calculate_score(PatternType.IGNITION, candles, regime)
-            if score >= 50:
+            if score >= MIN_ALERT_SCORE:
                 alerts.append(self._create_alert(symbol, PatternType.IGNITION, regime, current_candle, score))
 
         # C. Post-Impulse Pullback
         if self._check_post_impulse_pullback(candles, regime):
             score = self._calculate_score(PatternType.PULLBACK, candles, regime)
-            if score >= 50:
+            if score >= MIN_ALERT_SCORE:
                 alerts.append(self._create_alert(symbol, PatternType.PULLBACK, regime, current_candle, score))
 
         # D. Trap (Top/Bottom)
         if self._check_trap(candles, regime):
             score = self._calculate_score(PatternType.TRAP, candles, regime)
-            if score >= 50:
+            if score >= MIN_ALERT_SCORE:
                 alerts.append(self._create_alert(symbol, PatternType.TRAP, regime, current_candle, score))
                 
         # E. Failed Breakout
@@ -48,7 +58,7 @@ class Analyzer:
             # For MVP prevent duplicate alerts if Trap already fired? 
             # We'll just append it for now, user can filter.
             score = self._calculate_score(PatternType.FAILED_BREAKOUT, candles, regime)
-            if score >= 50:
+            if score >= MIN_ALERT_SCORE:
                 alerts.append(self._create_alert(symbol, PatternType.FAILED_BREAKOUT, regime, current_candle, score))
             
         return alerts
@@ -64,30 +74,38 @@ class Analyzer:
         spot_slope = current.spot_cvd_slope if current.spot_cvd_slope is not None else 0
         perp_slope = current.perp_cvd_slope if current.perp_cvd_slope is not None else 0
         
-        # Thresholds (MVP: arbitary simple check > 0)
-        # Real system needs more robust slope threshold, e.g. std dev of slope
-        threshold_spot = 0 # Placeholder, slope is often very small or large
-        threshold_perp = 0
+        # Thresholds
+        thresh = FLOW_SLOPE_THRESHOLD
         
-        # Normalize slopes to avoid noise?
-        # For MVP we stick to sign agreement
+        # Normalize slopes logic?
+        # For simplicity, we just check against the threshold.
         
-        spot_up = spot_slope > 0
-        spot_down = spot_slope < 0
-        perp_up = perp_slope > 0
-        perp_down = perp_slope < 0
+        spot_up = spot_slope > thresh
+        spot_down = spot_slope < -thresh
+        perp_up = perp_slope > thresh
+        perp_down = perp_slope < -thresh
         
-        if abs(spot_slope) < 1e-9 and abs(perp_slope) < 1e-9:
+        # Check for insignificance
+        if abs(spot_slope) <= thresh and abs(perp_slope) <= thresh:
              return FlowRegime.NEUTRAL
 
         if spot_up and perp_up:
-            return FlowRegime.CONSENSUS
+            return FlowRegime.BULLISH_CONSENSUS
         elif spot_down and perp_down:
-            return FlowRegime.CONSENSUS # Bearish consensus
+            return FlowRegime.BEARISH_CONSENSUS
         elif spot_up and (perp_down or not perp_up):
             return FlowRegime.SPOT_DOMINANT
         elif perp_up and (spot_down or not spot_up):
             return FlowRegime.PERP_DOMINANT
+        elif spot_down and (perp_up or not perp_down):
+             # Spot selling vs Perp neutral/buying
+             # If perp is technically up, it's Conflict.
+             # If perp is neutral, it might still be Spot Dominant (selling).
+             # Let's refine:
+             # Spot Dominant Selling: Spot < -T, Perp > -T (less bearish)
+             return FlowRegime.SPOT_DOMINANT
+        elif perp_down and (spot_up or not spot_down):
+             return FlowRegime.PERP_DOMINANT
             
         return FlowRegime.CONFLICT
 
@@ -103,9 +121,8 @@ class Analyzer:
             return False
             
         crossed_up = prev.close < prev.vwap and curr.close > curr.vwap
-        crossed_down = prev.close > prev.vwap and curr.close < curr.vwap
         
-        return (crossed_up or crossed_down) and regime != FlowRegime.NEUTRAL
+        return crossed_up and regime != FlowRegime.NEUTRAL
 
     def _check_ignition(self, candles: List[Candle], regime: FlowRegime) -> bool:
         """
@@ -119,7 +136,7 @@ class Analyzer:
             
         # Check if current range is significantly larger than ATR
         current_range = curr.high - curr.low
-        is_expansion = current_range > (curr.atr * 1.5)
+        is_expansion = current_range > (curr.atr * IGNITION_EXPANSION_THRESHOLD_ATR)
         
         # Check volume spike
         vol_spike = curr.volume > (prev.volume * 2)
@@ -144,7 +161,7 @@ class Analyzer:
         has_impulse = False
         for c in candles[-10:-1]:
             rng = c.high - c.low
-            if c.atr and rng > (c.atr * 2.0):
+            if c.atr and rng > (c.atr * IMPULSE_THRESHOLD_ATR):
                 has_impulse = True
                 break
         
@@ -153,11 +170,11 @@ class Analyzer:
             
         # 2. Current candle low volatility compression
         current_range = curr.high - curr.low
-        is_compressed = current_range < (curr.atr * 0.8) # Arbitrary factor
+        is_compressed = current_range < (curr.atr * PULLBACK_COMPRESSION_THRESHOLD_ATR) # Arbitrary factor
         
         # 3. Proximity to VWAP (e.g. within 0.1% or ATR based distance)
         dist_to_vwap = abs(curr.close - curr.vwap)
-        near_vwap = dist_to_vwap < (curr.atr * 0.5)
+        near_vwap = dist_to_vwap < (curr.atr * PULLBACK_VWAP_DISTANCE_ATR)
         
         return has_impulse and is_compressed and near_vwap
 
@@ -174,7 +191,7 @@ class Analyzer:
         curr = candles[-1]
         
         # Session High/Low (last 60? candles)
-        lookback = 60
+        lookback = SESSION_LOOKBACK_WINDOW
         history = candles[-lookback:] if len(candles) > lookback else candles
         
         recent_high = max(c.high for c in history[:-1])
@@ -207,7 +224,7 @@ class Analyzer:
         curr = candles[-1]
         
         # Session High/Low (last 60 candles)
-        lookback = 60
+        lookback = SESSION_LOOKBACK_WINDOW
         history = candles[-lookback:] if len(candles) > lookback else candles
         
         recent_high = max(c.high for c in history[:-1])
@@ -228,7 +245,7 @@ class Analyzer:
         # Failed Breakout has WEAK / NO flow backing.
         # e.g. Price breaks out, but flow remains Neutral or very weak, indicating no conviction.
         
-        is_weak_flow = regime == FlowRegime.NEUTRAL or regime == FlowRegime.CONSENSUS # Weak consensus implies just general drift?
+        is_weak_flow = regime == FlowRegime.NEUTRAL or regime == FlowRegime.BULLISH_CONSENSUS or regime == FlowRegime.BEARISH_CONSENSUS
         
         # Refinement: If it's CONSENSUS, it might be a real breakout that just wicked.
         # Failed breakout usually lacks the EXPLOSIVE flow of a real breakout.
@@ -239,31 +256,31 @@ class Analyzer:
         # Let's say if NOT Conflict and NOT Dominant -> Weak?
         # Actually SPEC says "Weak or absent flow follow-through".
         
-        return is_breakout_fail and (regime == FlowRegime.NEUTRAL)
+        return is_breakout_fail and is_weak_flow
 
     def _calculate_score(self, pattern: PatternType, candles: List[Candle], regime: FlowRegime) -> float:
         """
         Alert Scoring Model.
         """
         # Base Score
-        score = 50.0 
+        score = float(SCORING_WEIGHTS["BASE_PATTERN"]) 
         
         # Flow Alignment Bonus
-        if regime == FlowRegime.CONSENSUS:
-            score += 20
+        if regime == FlowRegime.BULLISH_CONSENSUS or regime == FlowRegime.BEARISH_CONSENSUS:
+            score += SCORING_WEIGHTS["FLOW_ALIGNMENT"]
         elif regime == FlowRegime.SPOT_DOMINANT: # Spot leading is gold
-            score += 15
+            score += SCORING_WEIGHTS["CONTEXT"]
         elif regime == FlowRegime.CONFLICT and pattern == PatternType.TRAP:
-            score += 20 # Conflict is good for Traps
+            score += SCORING_WEIGHTS["FLOW_ALIGNMENT"] # Conflict is good for Traps
             
         # Volatility Bonus
         current = candles[-1]
         if current.atr_percentile and current.atr_percentile > 80:
-            score += 10
+            score += SCORING_WEIGHTS["VOLATILITY"]
         elif current.atr_percentile and current.atr_percentile < 20:
              # Ignition thrives in low vol
              if pattern == PatternType.IGNITION:
-                 score += 10
+                 score += 10 # This 10 is specific to Ignition logic, could be a separate constant if desired, but 10 matches Volatility weight? Let's use VOLATILITY weight for now or just 10. keeping 10 as it might be distinct.
                  
         return min(100.0, score)
 

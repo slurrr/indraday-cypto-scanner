@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from typing import List
 from models.types import Candle
+from config.settings import ATR_WINDOW, ATR_PERCENTILE_WINDOW
 
 def calculate_vwap(candles: List[Candle]) -> List[float]:
     """
@@ -25,7 +26,7 @@ def calculate_vwap(candles: List[Candle]) -> List[float]:
     df['vwap'] = df['cum_pv'] / df['cum_vol']
     return df['vwap'].fillna(0).tolist()
 
-def calculate_atr(candles: List[Candle], period: int = 14) -> List[float]:
+def calculate_atr(candles: List[Candle], period: int = ATR_WINDOW) -> List[float]:
     """
     Calculate Average True Range (ATR).
     """
@@ -64,7 +65,7 @@ def calculate_slope(series: List[float], period: int = 5) -> List[float]:
         
     return slopes
 
-def calculate_atr_percentile(atrs: List[float], period: int = 100) -> List[float]:
+def calculate_atr_percentile(atrs: List[float], period: int = ATR_PERCENTILE_WINDOW) -> List[float]:
     """
     Calculate the percentile rank of the current ATR relative to the last N ATRs.
     """
@@ -82,7 +83,7 @@ def calculate_atr_percentile(atrs: List[float], period: int = 100) -> List[float
         
     return percentiles
 
-def update_indicators(candles: List[Candle], atr_period: int = 14):
+def update_indicators(candles: List[Candle], atr_period: int = ATR_WINDOW):
     """
     Batch update indicators for the whole history and attach to objects.
     Optimization: In a real system we would update incrementally.
@@ -114,7 +115,7 @@ def update_indicators(candles: List[Candle], atr_period: int = 14):
     perp_slopes = calculate_slope(perp_cum, period=5)
     
     # ATR Percentile
-    atr_percentiles = calculate_atr_percentile(atrs, period=100)
+    atr_percentiles = calculate_atr_percentile(atrs, period=ATR_PERCENTILE_WINDOW)
     
     for i, candle in enumerate(candles):
         candle.vwap = vwaps[i]
