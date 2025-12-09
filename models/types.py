@@ -42,6 +42,10 @@ class Candle:
     # Indicators
     vwap: Optional[float] = None
     atr: Optional[float] = None
+    vwap_slope: Optional[float] = None
+    atr_percentile: Optional[float] = None
+    spot_cvd_slope: Optional[float] = None
+    perp_cvd_slope: Optional[float] = None
     
 @dataclass
 class Alert:

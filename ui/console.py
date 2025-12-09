@@ -3,6 +3,7 @@ from rich.table import Table
 from rich.live import Live
 from rich.layout import Layout
 from typing import List
+import pandas as pd
 from models.types import Alert, FlowRegime
 
 class ConsoleUI:
@@ -32,8 +33,12 @@ class ConsoleUI:
             elif alert.flow_regime == FlowRegime.CONFLICT:
                 regime_style = "red"
                 
+            # Format time: Milliseconds -> UTC -> Denver
+            ts = pd.to_datetime(alert.timestamp, unit='ms').tz_localize('UTC').tz_convert('America/Denver')
+            time_str = ts.strftime('%H:%M:%S')
+
             table.add_row(
-                str(alert.timestamp), # TODO: formatting
+                time_str,
                 alert.symbol,
                 alert.pattern.value,
                 f"{alert.price:.4f}",
