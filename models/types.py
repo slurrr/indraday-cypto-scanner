@@ -65,6 +65,7 @@ class Candle:
 @dataclass
 class Alert:
     timestamp: int
+    candle_timestamp: int
     symbol: str
     pattern: PatternType
     score: float
