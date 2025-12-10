@@ -322,6 +322,7 @@ class Analyzer:
         # instead of the candle open time which is always HH:MM:00
         return Alert(
             timestamp=int(time.time() * 1000),
+            candle_timestamp=candle.timestamp,
             symbol=symbol,
             pattern=pattern,
             score=score,

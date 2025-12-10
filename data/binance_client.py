@@ -7,17 +7,26 @@ from config.settings import BINANCE_SPOT_WS_URL, BINANCE_PERP_WS_URL
 from models.types import Trade, Candle, StatusSink
 from utils.logger import setup_logger
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 logger = setup_logger("BinanceClient")
 
 class BinanceClient:
     def __init__(self, symbols: List[str], on_trade_callback: Callable[[Trade], None], status_sink: StatusSink = None):
-        self.symbols = [s.lower() for s in symbols]
+        self.symbols = [s.upper() for s in symbols]
         self.on_trade_callback = on_trade_callback
         self.status_sink = status_sink
         self.ws_spot = None
         self.ws_perp = None
         self.keep_running = True
+        
+        # Initialize persistent session for API calls to prevent socket exhaustion
+        self.session = requests.Session()
+        retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
+        adapter = HTTPAdapter(max_retries=retries)
+        self.session.mount('https://', adapter)
+        self.session.mount('http://', adapter)
         
     def _on_message_spot(self, ws, message):
         try:
@@ -65,7 +74,8 @@ class BinanceClient:
         if self.status_sink:
             self.status_sink.feed_connected()
         # Subscribe to aggTrade for all symbols
-        params = [f"{s}@aggTrade" for s in self.symbols]
+        # IMPORTANT: Binance requires lowercase symbols for streams (e.g. btcusdt@aggTrade)
+        params = [f"{s.lower()}@aggTrade" for s in self.symbols]
         subscribe_msg = {
             "method": "SUBSCRIBE",
             "params": params,
@@ -84,7 +94,7 @@ class BinanceClient:
         
         base_url = "https://api.binance.com/api/v3/klines"
         
-        for symbol in self.symbols:
+        for index, symbol in enumerate(self.symbols):
             try:
                 # Interval 1m, Limit = lookback
                 params = {
@@ -92,7 +102,7 @@ class BinanceClient:
                     "interval": "1m",
                     "limit": lookback_minutes
                 }
-                resp = requests.get(base_url, params=params, timeout=10)
+                resp = self.session.get(base_url, params=params, timeout=10)
                 resp.raise_for_status()
                 data = resp.json()
                 
@@ -115,10 +125,54 @@ class BinanceClient:
                 
                 history[symbol] = candles
                 
+                # Small sleep to prevent rate limiting during init burst if many symbols
+                if index % 10 == 0:
+                    time.sleep(0.1)
+                
             except Exception as e:
                 logger.error(f"Failed to fetch history for {symbol}: {e}")
                 
         return history
+
+    def fetch_latest_candle(self, symbol: str) -> requests.Response:
+        """
+        Fetch the most recently closed candle for a specific symbol via REST API.
+        This is used for reconciliation.
+        """
+        base_url = "https://api.binance.com/api/v3/klines"
+        try:
+            # We want the LAST closed candle. 
+            # Requesting limit=2 ensures we get the just-closed one + the currently forming one.
+            # We will take the second to last item.
+            params = {
+                "symbol": symbol.upper(),
+                "interval": "1m",
+                "limit": 2
+            }
+            resp = self.session.get(base_url, params=params, timeout=5)
+            resp.raise_for_status()
+            data = resp.json()
+            
+            if len(data) >= 2:
+                # data[-2] is the fully closed candle we want
+                k = data[-2]
+                return Candle(
+                    symbol=symbol,
+                    timestamp=k[0],
+                    open=float(k[1]),
+                    high=float(k[2]),
+                    low=float(k[3]),
+                    close=float(k[4]),
+                    volume=float(k[5]),
+                    spot_cvd=0.0, # REST API doesn't give us CVD, we must preserve or approximate? 
+                                  # Ideally we preserve the local CVD but correct the Prices/Volume.
+                    perp_cvd=0.0,
+                    closed=True
+                )
+        except Exception as e:
+            # Log specific error if it's related to connections
+            logger.error(f"Failed to fetch latest candle for {symbol}: {e}")
+        return None
 
     def start(self):
         """Start spot and perp connections in separate threads"""
@@ -150,3 +204,6 @@ class BinanceClient:
             self.ws_spot.close()
         if self.ws_perp:
             self.ws_perp.close()
+        # Close the http session
+        if self.session:
+            self.session.close()

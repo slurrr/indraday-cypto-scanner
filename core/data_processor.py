@@ -83,6 +83,24 @@ class DataProcessor:
         if len(self.history[symbol]) > 1000:
             self.history[symbol].pop(0)
 
+    def update_history_candle(self, symbol: str, new_candle: Candle):
+        """
+        Replaces a candle in history with a reconciled version (e.g. from API).
+        Preserves the CVD from the local version if the new version has 0.
+        """
+        if symbol not in self.history:
+            return
+
+        for i, c in enumerate(self.history[symbol]):
+            if c.timestamp == new_candle.timestamp:
+                # Preserve locally calculated CVD since REST API doesn't have it
+                new_candle.spot_cvd = c.spot_cvd
+                new_candle.perp_cvd = c.perp_cvd
+                
+                self.history[symbol][i] = new_candle
+                logger.debug(f"Reconciled candle for {symbol} at {new_candle.timestamp}")
+                return
+
     def get_history(self, symbol: str) -> List[Candle]:
         return self.history.get(symbol, [])
 
