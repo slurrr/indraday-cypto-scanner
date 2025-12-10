@@ -12,7 +12,9 @@ from ui.console import ConsoleUI
 from models.types import Alert, PatternType, FlowRegime
 
 def test_ui_render():
-    ui = ConsoleUI()
+    # Capture output to verify rendering
+    capture_console = Console(file=io.StringIO(), width=120)
+    ui = ConsoleUI(console=capture_console)
     
     # Mock Alert with fixed timestamp for deterministic testing
     # 2023-01-01 12:00:00 UTC = 1672574400000 ms
@@ -34,8 +36,6 @@ def test_ui_render():
     try:
         table = ui.generate_table()
         
-        # Capture output to verify rendering
-        capture_console = Console(file=io.StringIO(), width=120)
         capture_console.print(table)
         output = capture_console.file.getvalue()
         

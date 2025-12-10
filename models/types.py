@@ -2,6 +2,20 @@ from enum import Enum
 from dataclasses import dataclass, field
 from typing import List, Optional
 from datetime import datetime
+from typing import Protocol, Any
+
+class StatusSink(Protocol):
+    def feed_connected(self):
+        ...
+
+    def tick(self):
+        ...
+
+    def alert_fired(self, n: int = 1):
+        ...
+
+    def error(self, msg: str):
+        ...
 
 class FlowRegime(str, Enum):
     BULLISH_CONSENSUS = "FLOW_BULLISH"
