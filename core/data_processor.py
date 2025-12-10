@@ -1,12 +1,14 @@
 from typing import Dict, List, Optional
-from models.types import Trade, Candle
+from models.types import Trade, Candle, StatusSink
 from utils.logger import setup_logger
 import math
+from time import time
 
 logger = setup_logger("DataProcessor")
 
 class DataProcessor:
-    def __init__(self):
+    def __init__(self, status_sink: StatusSink):
+        self.status_sink = status_sink
         # symbol -> current_candle (Candle)
         self.active_candles: Dict[str, Candle] = {}
         # symbol -> history of candles (list)
@@ -40,7 +42,7 @@ class DataProcessor:
         else:
             # First candle for this symbol
             self.active_candles[symbol] = self._create_new_candle(trade, minute_start_ms, trade.price)
-            
+        self.status_sink.tick()
         return closed_candle
 
     def _create_new_candle(self, trade: Trade, timestamp: int, open_price: float) -> Candle:

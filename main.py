@@ -1,50 +1,66 @@
+import sys, os
+from rich.console import Console
+from rich.live import Live
+
+# Keep a real stdout for Rich to use
+REAL_STDOUT = sys.__stdout__
+
+# Create Rich console bound to REAL terminal output
+console = Console(file=REAL_STDOUT)
+
+from ui.console import ConsoleUI  # import AFTER console exists
+
 import time
 import signal
-import sys
-from rich.live import Live
 from config.settings import SYMBOLS
 from data.binance_client import BinanceClient
 from core.data_processor import DataProcessor
 from core.analyzer import Analyzer
 from core.indicators import update_indicators
-from ui.console import ConsoleUI
 from models.types import Trade
 from utils.logger import setup_logger
 
-logger = setup_logger("Main")
+logger = setup_logger("scanner")
+logger.info("UI object constructed in main()")
 
 def main():
     logger.info("Starting Intraday Flow Scanner...")
 
     # Components
-    data_processor = DataProcessor()
+    ui = ConsoleUI(console=console)
+    data_processor = DataProcessor(status_sink=ui)
     analyzer = Analyzer()
-    ui = ConsoleUI()
+    ui.dirty = True
+
+    def handle_alerts(alerts: List[Alert]):
+        for alert in alerts:
+            ui.add_alert(alert)
+            logger.info(f"ALERT: {alert}")
 
     # Callback for new trades
     def on_trade(trade: Trade):
         # process_trade returns a Candle ONLY when a minute closes
         closed_candle = data_processor.process_trade(trade)
+        if not closed_candle:
+            return
+
+        symbol = closed_candle.symbol
+        # 1. Get updated history
+        history = data_processor.get_history(symbol)
         
-        if closed_candle:
-            symbol = closed_candle.symbol
-            # 1. Get updated history
-            history = data_processor.get_history(symbol)
-            
-            # 2. Update Indicators (VWAP, ATR, etc.) for this symbol
-            # Performance Note: Re-calculating for whole history every minute is fine for MVP
-            update_indicators(history)
-            
-            # 3. Analyze Patterns
-            new_alerts = analyzer.analyze(symbol, history)
-            
-            # 4. Update UI
-            for alert in new_alerts:
-                ui.add_alert(alert)
-                logger.info(f"ALERT: {alert}")
+        # 2. Update Indicators (VWAP, ATR, etc.) for this symbol
+        # Performance Note: Re-calculating for whole history every minute is fine for MVP
+        update_indicators(history)
+        
+        # 3. Analyze Patterns
+        new_alerts = analyzer.analyze(symbol, history)
+
+        # 4. Update UI
+        if new_alerts:
+            handle_alerts(new_alerts)
 
     # Setup Binance Client
-    client = BinanceClient(SYMBOLS, on_trade_callback=on_trade)
+    client = BinanceClient(SYMBOLS, on_trade_callback=on_trade, status_sink=ui)
     
     # Initialize History
     try:
@@ -52,14 +68,23 @@ def main():
         data_processor.init_history(history_map)
         
         # Pre-calculate indicators for history so we start hot
-        for symbol in SYMBOLS:
-            hist = data_processor.get_history(symbol)
+        for symbol, hist in history_map.items():
             if hist:
                 update_indicators(hist)
+                # analyze prefetched history
+                alerts = analyzer.analyze(symbol, hist)
+                for alert in alerts:
+                    ui.add_alert(alert)
+
+        # Force UI to render prefetched alerts
+        if ui.alerts:
+            ui.dirty = True
+
     except Exception as e:
         logger.error(f"Failed to initialize history: {e}")
 
     client.start()
+
 
     # Graceful Shutdown
     def signal_handler(sig, frame):
@@ -71,14 +96,21 @@ def main():
 
     # UI Loop
     try:
-        with Live(ui.generate_table(), refresh_per_second=4) as live:
+        with Live(
+            ui.generate_layout(), 
+            console=console,
+            refresh_per_second=2,
+            screen=False
+        ) as live:
             while True:
-                live.update(ui.generate_table())
-                time.sleep(0.25)
+                if ui.dirty:          # set only when alerts change
+                    live.update(ui.generate_layout())
+                    ui.dirty = False
+                time.sleep(0.1)
     except KeyboardInterrupt:
-        logger.info("Keyboard Interrupt")
+        pass # logger.info("Keyboard Interrupt")
     finally:
-        client.stop()
+        pass # client.stop()
 
 if __name__ == "__main__":
     main()

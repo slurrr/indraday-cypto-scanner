@@ -2,20 +2,103 @@ from rich.console import Console
 from rich.table import Table
 from rich.live import Live
 from rich.layout import Layout
+from time import sleep
 from typing import List
 import pandas as pd
 from models.types import Alert, FlowRegime
+from dataclasses import dataclass
+from time import time
+#from main import ui
+from rich.panel import Panel
+from rich.text import Text
+from rich.layout import Layout
+from datetime import datetime
+from utils.logger import setup_logger
 
-class ConsoleUI:
-    def __init__(self):
-        self.console = Console()
+logger = setup_logger("ui")
+
+@dataclass
+class UIStatus:
+    feed_connected: bool = False
+    last_tick_ts: float | None = None
+    total_alerts: int = 0
+    last_error: str | None = None
+
+class ConsoleUI():
+    def __init__(self, console):
+        logger.info("ConsoleUI initialized")
+        self.console = console
         self.alerts: List[Alert] = []
+        self.dirty = False 
+        self.status = UIStatus()
+
+    def feed_connected(self):
+        self.status.feed_connected = True
+        self.dirty = True
+
+    def tick(self):
+        self.status.last_tick_ts = time()
+
+    def alert_fired(self, n: int = 1):
+        self.status.total_alerts += n
+        self.dirty = True
+
+    def error(self, msg: str):
+        self.status.last_error = msg
+        self.dirty = True
         
     def add_alert(self, alert: Alert):
         self.alerts.insert(0, alert)
-        # Keep only last 50 alerts
         self.alerts = self.alerts[:50]
-        
+        self.alert_fired()
+        self.dirty = True
+
+        logger.info(f"UI RECEIVED ALERT: {alert.symbol} {alert.pattern}")
+
+    def generate_status_panel(self) -> Panel:
+        items = []
+
+        # Feed
+        if self.status.feed_connected:
+            items.append("[green]Feed: OK[/]")
+        else:
+            items.append("[red]Feed: DISCONNECTED[/]")
+
+        # Last tick
+        now = time()
+
+        if self.status.last_tick_ts is None:
+            items.append("[yellow]Waiting for data[/]")
+        else:
+            age = now - self.status.last_tick_ts
+            ts = datetime.fromtimestamp(self.status.last_tick_ts)
+            ts_str = ts.strftime("%H:%M:%S")
+
+            if age > 30:
+                items.append("[red]Feed stale[/]")
+            elif age > 10:
+                items.append(f"[yellow]Last tick:[/] {ts_str}")
+            else:
+                items.append(f"[cyan]Last tick:[/] {ts_str}")
+
+        # Alerts
+        items.append(f"[magenta]Alerts:[/] {self.status.total_alerts}")
+
+        # Error (if any)
+        if self.status.last_error:
+            items.append(f"[red]Error:[/] {self.status.last_error}")
+
+        content = "  |  ".join(items)
+        return Panel(Text.from_markup(content), title="Status", border_style="blue")
+
+    def generate_layout(self) -> Layout:
+        layout = Layout()
+        layout.split_column(
+            Layout(self.generate_table(), name="table", ratio=4),
+            Layout(self.generate_status_panel(), name="status", size=3),
+        )
+        return layout
+
     def generate_table(self) -> Table:
         table = Table(title="Intraday Flow Scanner")
         table.add_column("Time", style="cyan", no_wrap=True)
@@ -39,12 +122,19 @@ class ConsoleUI:
             ts = pd.to_datetime(alert.timestamp, unit='ms').tz_localize('UTC').tz_convert('America/Denver')
             time_str = ts.strftime('%H:%M:%S')
 
+            # Add TradingView Link
+            tv_link = (
+                f"[link=https://www.tradingview.com/chart/?symbol=BINANCE:{alert.symbol}]"
+                f"{alert.symbol}[/link]"
+            )
+
             table.add_row(
                 time_str,
-                alert.symbol,
+                tv_link,
                 alert.pattern.value,
                 f"{alert.price:.4f}",
                 f"[{regime_style}]{alert.flow_regime.value}[/]",
                 str(alert.score)
             )
         return table
+

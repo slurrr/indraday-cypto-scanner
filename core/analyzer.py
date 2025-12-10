@@ -135,14 +135,46 @@ class Analyzer:
         if not curr.atr or not prev.atr:
             return False
             
-        # Check if current range is significantly larger than ATR
+        # 0. Pre-condition: Low Prior Volatility
+        # User requirement: "ATR percentile below threshold before expansion"
+        # We check previous candle's percentile.
+        if prev.atr_percentile is None or prev.atr_percentile > MIN_ATR_PERCENTILE:
+            return False
+
+        # 1. Expansion: Current range significantly larger than ATR
         current_range = curr.high - curr.low
-        is_expansion = current_range > (curr.atr * IGNITION_EXPANSION_THRESHOLD_ATR)
+        is_expansion = current_range > (prev.atr * IGNITION_EXPANSION_THRESHOLD_ATR)
         
-        # Check volume spike
+        # 2. Volume Spike
         vol_spike = curr.volume > (prev.volume * 2)
         
-        return is_expansion and vol_spike and regime != FlowRegime.NEUTRAL
+        if not (is_expansion and vol_spike):
+            return False
+            
+        # 3. Flow Regime Alignment
+        is_bullish_candle = curr.close > curr.open
+        is_bearish_candle = curr.close < curr.open
+        
+        if is_bullish_candle:
+            # Bullish Requirements: BULLISH_CONSENSUS or SPOT_DOMINANT
+            valid_regime = regime in [FlowRegime.BULLISH_CONSENSUS, FlowRegime.SPOT_DOMINANT]
+            # Also ensure price is above VWAP (moving away)
+            valid_vwap = curr.close > curr.vwap if curr.vwap else True
+            if not (valid_regime and valid_vwap):
+                return False
+                
+        elif is_bearish_candle:
+            # Bearish Requirements: BEARISH_CONSENSUS or PERP_DOMINANT
+            valid_regime = regime in [FlowRegime.BEARISH_CONSENSUS, FlowRegime.PERP_DOMINANT]
+            # Also ensure price is below VWAP
+            valid_vwap = curr.close < curr.vwap if curr.vwap else True
+            if not (valid_regime and valid_vwap):
+                return False
+        else:
+            # Doji / Flat
+            return False
+            
+        return True
 
     def _check_post_impulse_pullback(self, candles: List[Candle], regime: FlowRegime) -> bool:
         """
