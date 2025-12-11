@@ -154,13 +154,13 @@ def main():
         with Live(
             ui.generate_layout(), 
             console=console,
-            refresh_per_second=2,
+            auto_refresh=False,
             screen=False
         ) as live:
             while True:
                 if ui.dirty:          # set only when alerts change
                     ui.dirty = False
-                    live.update(ui.generate_layout())
+                    live.update(ui.generate_layout(), refresh=True)
                 time.sleep(0.1)
     except KeyboardInterrupt:
         pass # logger.info("Keyboard Interrupt")
