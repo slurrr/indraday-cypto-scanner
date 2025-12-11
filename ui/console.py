@@ -1,15 +1,11 @@
-from rich.console import Console
 from rich.table import Table
-from rich.live import Live
 from rich.layout import Layout
 import threading
-from time import sleep
 from typing import List
 import pandas as pd
 from models.types import Alert, FlowRegime
 from dataclasses import dataclass
 from time import time
-#from main import ui
 from rich.panel import Panel
 from rich.text import Text
 from rich.layout import Layout
