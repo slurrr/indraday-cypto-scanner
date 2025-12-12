@@ -1,3 +1,5 @@
+from config.settings import ANALYZER_DEBUG
+import json
 import sys, os
 from typing import List
 from rich.console import Console
@@ -9,10 +11,11 @@ REAL_STDOUT = sys.__stdout__
 # Create Rich console bound to REAL terminal output
 console = Console(file=REAL_STDOUT)
 
-from ui.console import ConsoleUI  # import AFTER console exists
+from ui.console import ConsoleUI, UIStatus  # import AFTER console exists
 
 import time
 import signal
+import queue
 import threading
 from config.settings import SYMBOLS
 from data.binance_client import BinanceClient
@@ -22,8 +25,21 @@ from core.indicators import update_indicators
 from models.types import Trade, Alert
 from utils.logger import setup_logger
 
-logger = setup_logger("scanner")
-logger.info("UI object constructed in main()")
+INSTANCE_ID = os.environ.get("SCANNER_INSTANCE", os.getpid())
+
+LOG_FILE = f"utils/scanner_{INSTANCE_ID}.log"
+DEBUG_LOG_FILE = f"utils/debug_scanner_{INSTANCE_ID}.log"
+
+logger = setup_logger(
+    "scanner",
+    log_file=LOG_FILE,
+)
+
+debug_logger = setup_logger(
+    "debug_scanner",
+    log_file=DEBUG_LOG_FILE,
+    level="DEBUG",
+)
 
 def main():
     logger.info("Starting Intraday Flow Scanner...")
@@ -56,7 +72,51 @@ def main():
         
         for alert in new_unique_alerts:
             ui.add_alert(alert)
+            ui.add_alert(alert)
             logger.info(f"ALERT: {alert}")
+
+    # --- Analysis Worker Implementation ---
+    analysis_queue = queue.Queue()
+    queued_symbols = set()
+    queue_lock = threading.Lock()
+
+    def analysis_worker():
+        while True:
+            symbol = analysis_queue.get()
+            try:
+                # Remove from set to allow re-queuing
+                with queue_lock:
+                    queued_symbols.discard(symbol)
+                
+                # Perform Analysis with lock
+                with symbol_locks[symbol]:
+                    # 1. Get history
+                    history = data_processor.get_history(symbol)
+                    
+                    # 2. Update Indicators
+                    update_indicators(history)
+                    
+                    # 3. Analyze
+                    alerts = analyzer.analyze(symbol, history)
+                    
+                    # Debug logic
+                    if ANALYZER_DEBUG:
+                        dbg = analyzer.debug_analyze(symbol, history)
+                        for pat, result in dbg["patterns"].items():
+                            if not result["ok"] and any(k in result["reason"].lower() for k in ["not", "missing", "near"]):
+                                debug_logger.debug(f"[DEBUG][{symbol}] Almost {pat}: {result['reason']}")
+
+                    # 4. Handle Alerts
+                    if alerts:
+                        handle_alerts(alerts)
+                        
+            except Exception as e:
+                logger.error(f"Error in analysis worker for {symbol}: {e}")
+            finally:
+                analysis_queue.task_done()
+
+    # Start worker thread
+    threading.Thread(target=analysis_worker, daemon=True, name="AnalysisWorker").start()
 
     # Function to reconcile candle in background
     def reconcile_candle(symbol: str, timestamp: int):
@@ -92,19 +152,12 @@ def main():
             if not closed_candle:
                 return
 
+            # Offload heavy analysis to worker
             symbol = closed_candle.symbol
-            # 1. Get updated history (Local Version)
-            history = data_processor.get_history(symbol)
-            
-            # 2. Update Indicators (VWAP, ATR, etc.) for this symbol
-            update_indicators(history)
-            
-            # 3. Analyze Patterns
-            new_alerts = analyzer.analyze(symbol, history)
-
-            # 4. Update UI
-            if new_alerts:
-                handle_alerts(new_alerts)
+            with queue_lock:
+                if symbol not in queued_symbols:
+                    queued_symbols.add(symbol)
+                    analysis_queue.put(symbol)
 
         # --- SLOW PATH: Background Reconciliation ---
         # Spawning a thread here moves the Network I/O out of the critical path
@@ -116,7 +169,9 @@ def main():
 
     # Setup Binance Client
     client = BinanceClient(SYMBOLS, on_trade_callback=on_trade, status_sink=ui)
-    
+    ui.status.binance_client = client
+    logger.info(f"main.py client id: {id(client)}")
+
     # Initialize History
     try:
         history_map = client.fetch_historical_candles(lookback_minutes=1000)
