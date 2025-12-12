@@ -20,6 +20,7 @@ class UIStatus:
     last_tick_ts: float | None = None
     total_alerts: int = 0
     last_error: str | None = None
+    binance_client: BinanceClient | None = None
 
 class ConsoleUI():
     def __init__(self, console):
@@ -83,6 +84,14 @@ class ConsoleUI():
         # Alerts
         items.append(f"[magenta]Alerts:[/] {self.status.total_alerts}")
 
+        # WS Metrics
+        if self.status.binance_client:
+            ws_metrics = self.status.binance_client.get_ws_metrics()
+            items.append(
+                f"[blue]WS Messages:[/] {ws_metrics.get('total', 0)} "
+                f"(dropped {ws_metrics.get('dropped', 0)} {ws_metrics.get('drop_pct', 0.0):.2f}%)"
+            )
+
         # Error (if any)
         if self.status.last_error:
             items.append(f"[red]Error:[/] {self.status.last_error}")
@@ -96,6 +105,7 @@ class ConsoleUI():
             Layout(self.generate_table(), name="table", ratio=4),
             Layout(self.generate_status_panel(), name="status", size=3),
         )
+        self.layout = layout
         return layout
 
     def generate_table(self) -> Table:
@@ -140,4 +150,12 @@ class ConsoleUI():
                 str(alert.score)
             )
         return table
+
+    def update_table(self):
+        assert hasattr(self, "layout")
+        self.layout["table"].update(self.generate_table())
+
+    def update_status(self):
+        assert hasattr(self, "layout")
+        self.layout["status"].update(self.generate_status_panel())
 

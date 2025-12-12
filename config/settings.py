@@ -14,6 +14,9 @@ TIMEFRAME_3M = "3m"
 TIMEFRAME_5M = "5m"
 TIMEFRAME_15M = "15m"
 
+# Candle timeframe (minutes)
+CANDLE_TIMEFRAME_MINUTES = 3
+
 # Websocket URLs
 BINANCE_SPOT_WS_URL = "wss://stream.binance.com:9443/ws"
 BINANCE_PERP_WS_URL = "wss://fstream.binance.com/ws"
@@ -43,7 +46,11 @@ SCORING_WEIGHTS = {
 
 # Logging
 LOG_LEVEL = "INFO"
+LOG_FILE = "utils/scanner.log"
+DEBUG_LOG_FILE = "utils/debug_scanner.log"
 
 # Flow Thresholds
 FLOW_SLOPE_THRESHOLD = 0.5 # Minimum slope to consider significant
 
+# Debug mode for analyzer
+ANALYZER_DEBUG = True   # Set False for production

@@ -3,6 +3,7 @@ from models.types import Trade, Candle, StatusSink
 from utils.logger import setup_logger
 import math
 from time import time
+from config.settings import CANDLE_TIMEFRAME_MINUTES
 
 logger = setup_logger("DataProcessor")
 
@@ -19,9 +20,11 @@ class DataProcessor:
         Ingest a trade, update the current candle. 
         Returns a Candle if a candle just closed (for the PREVIOUS minute), else None.
         """
+        assert trade is not None
+        assert trade.timestamp is not None
         symbol = trade.symbol
-        timestamp_s = trade.timestamp / 1000.0
-        minute_start_ms = int(timestamp_s // 60) * 60 * 1000
+        tf_ms = CANDLE_TIMEFRAME_MINUTES * 60 * 1000
+        minute_start_ms = (trade.timestamp // tf_ms) * tf_ms
         
         closed_candle = None
         
@@ -42,7 +45,9 @@ class DataProcessor:
         else:
             # First candle for this symbol
             self.active_candles[symbol] = self._create_new_candle(trade, minute_start_ms, trade.price)
-        self.status_sink.tick()
+        if closed_candle:
+            self.status_sink.tick()
+
         return closed_candle
 
     def _create_new_candle(self, trade: Trade, timestamp: int, open_price: float) -> Candle:
