@@ -72,7 +72,6 @@ def main():
         
         for alert in new_unique_alerts:
             ui.add_alert(alert)
-            ui.add_alert(alert)
             logger.info(f"ALERT: {alert}")
 
     # --- Analysis Worker Implementation ---
@@ -108,6 +107,10 @@ def main():
 
                     # 4. Handle Alerts
                     if alerts:
+                        debug_logger.debug(
+                            f"[DEBUG_BARS] {symbol} 3m bars={len(history)} "
+                            f"ready={len(history) >= 120}"
+                        )
                         handle_alerts(alerts)
                         
             except Exception as e:
@@ -137,6 +140,10 @@ def main():
                 reconciled_alerts = analyzer.analyze(symbol, history)
                 
                 if reconciled_alerts:
+                    debug_logger.debug(
+                        f"[DEBUG_BARS] {symbol} 3m bars={len(history)} "
+                        f"ready={len(history) >= 120}"
+                    )
                     handle_alerts(reconciled_alerts)
 
     # Callback for new trades
@@ -174,7 +181,7 @@ def main():
 
     # Initialize History
     try:
-        history_map = client.fetch_historical_candles(lookback_minutes=1000)
+        history_map = client.fetch_historical_candles(lookback_bars=1000)
         data_processor.init_history(history_map)
         
         # Pre-calculate indicators for history so we start hot

@@ -130,13 +130,13 @@ class BinanceClient:
         ws.send(json.dumps(subscribe_msg))
         logger.info(f"Subscribed to {len(self.symbols)} symbols")
 
-    def fetch_historical_candles(self, lookback_minutes: int = 1000) -> Dict[str, List[Candle]]:
+    def fetch_historical_candles(self, lookback_bars: int = 1000) -> Dict[str, List[Candle]]:
         """
         Fetch historical klines for all symbols via REST API to initialize history.
         Uses Binance Spot API.
         """
         history = {}
-        logger.info(f"Fetching {lookback_minutes} minutes of history for {len(self.symbols)} symbols...")
+        logger.info(f"Fetching {lookback_bars} bars of history for {len(self.symbols)} symbols...")
         
         base_url = "https://api.binance.com/api/v3/klines"
         
@@ -146,7 +146,7 @@ class BinanceClient:
                 params = {
                     "symbol": symbol.upper(),
                     "interval": f"{CANDLE_TIMEFRAME_MINUTES}m",
-                    "limit": lookback_minutes
+                    "limit": lookback_bars
                 }
                 resp = self.session.get(base_url, params=params, timeout=10)
                 resp.raise_for_status()

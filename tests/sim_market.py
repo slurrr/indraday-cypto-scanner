@@ -72,7 +72,9 @@ def simulate_ignition_pattern():
         print("FAILURE: No ignition alert triggered.")
         # Debug
         curr = candles[-1]
-        regime = analyzer._determine_regime(candles)
+        dbg = analyzer.debug_analyze("BTCUSDT", candles)
+        print(f"Debug Reason: {dbg['patterns']['IGNITION']}")
+        regime = analyzer._determine_regime(candles, candles[-1])
         print(f"Debug: ATR={curr.atr}, Range={curr.high-curr.low}, Vol={curr.volume}, PrevVol={candles[-2].volume}, Regime={regime}")
 
 def simulate_trap_pattern():
@@ -125,7 +127,7 @@ def simulate_trap_pattern():
     
     # If we get here
     print("FAILURE: No trap alert triggered.")
-    regime = analyzer._determine_regime(candles)
+    regime = analyzer._determine_regime(candles, candles[-1])
     print(f"Debug: Regime={regime}, SpotSlope={candles[-1].spot_cvd_slope}")
 
 def simulate_failed_breakout():

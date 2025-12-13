@@ -19,9 +19,14 @@ def calculate_vwap(candles: List[Candle]) -> List[float]:
     df['typical_price'] = (df['high'] + df['low'] + df['close']) / 3
     df['pv'] = df['typical_price'] * df['volume']
     
-    # Ideally we reset VWAP at session start, but for MVP we run it rolling from start of history
-    df['cum_pv'] = df['pv'].cumsum()
-    df['cum_vol'] = df['volume'].cumsum()
+    # Logic to reset VWAP daily (00:00 UTC)
+    # Convert timestamp (ms) to datetime UTC
+    df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
+    df['date_group'] = df['datetime'].dt.date
+    
+    # Group by date and calculate cumulative sums within each day
+    df['cum_pv'] = df.groupby('date_group')['pv'].cumsum()
+    df['cum_vol'] = df.groupby('date_group')['volume'].cumsum()
     
     df['vwap'] = df['cum_pv'] / df['cum_vol']
     return df['vwap'].fillna(0).tolist()
