@@ -20,7 +20,7 @@ class UIStatus:
     last_tick_ts: float | None = None
     total_alerts: int = 0
     last_error: str | None = None
-    binance_client: BinanceClient | None = None
+    binance_client: "BinanceClient | None" = None
 
 class ConsoleUI():
     def __init__(self, console):

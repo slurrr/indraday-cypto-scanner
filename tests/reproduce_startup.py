@@ -79,7 +79,7 @@ def main():
         #   determine_regime
         #   check patterns
         
-        regime = analyzer._determine_regime(history)
+        regime = analyzer._determine_regime(history, history[-1])
         alerts = analyzer.analyze("BTCUSDT", history)
         
         print(f"\n[Minute {i+1}]")

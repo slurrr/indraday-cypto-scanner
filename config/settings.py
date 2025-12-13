@@ -50,7 +50,8 @@ LOG_FILE = "utils/scanner.log"
 DEBUG_LOG_FILE = "utils/debug_scanner.log"
 
 # Flow Thresholds
-FLOW_SLOPE_THRESHOLD = 0.5 # Minimum slope to consider significant
+BASE_FLOW_SLOPE_THRESHOLD_1M = 0.5
+FLOW_SLOPE_THRESHOLD = BASE_FLOW_SLOPE_THRESHOLD_1M * CANDLE_TIMEFRAME_MINUTES # Dynamic scaling per timeframe
 
 # Debug mode for analyzer
 ANALYZER_DEBUG = True   # Set False for production

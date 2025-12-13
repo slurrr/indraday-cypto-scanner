@@ -55,16 +55,15 @@ class TestIgnitionLogic:
             atr=2.0, 
             atr_percentile=80.0, # Increasing volatility
             vwap=102.0, # Price moving away from VWAP (108 > 102)
-            spot_slope=1.0, perp_slope=1.0 # Bullish Consensus
+            spot_slope=2.0, perp_slope=2.0 # Bullish Consensus
         )
         
-        candles = [prev_candle] * 20 # Padding
+        candles = [prev_candle] * 40 # Padding
         candles.append(prev_candle)
         candles.append(curr_candle)
         
         # Verify Positive Case
         alerts = analyzer.analyze("BTCUSDT", candles)
-        ignition = [a for a in alerts if a.pattern == PatternType.IGNITION]
         assert len(ignition) == 1, "Should detect valid bullish ignition"
         
     def test_ignition_rejects_conflict_regime(self):
@@ -104,7 +103,7 @@ class TestIgnitionLogic:
         # "Bullish ignition requires ... regime in {BULLISH_CONSENSUS, SPOT_DOMINANT}"
         # So PERP_DOMINANT should be REJECTED for Bullish Ignition.
         
-        candles = [prev_candle] * 20 + [prev_candle, curr_candle]
+        candles = [prev_candle] * 40 + [prev_candle, curr_candle]
         alerts = analyzer.analyze("BTCUSDT", candles)
         ignition = [a for a in alerts if a.pattern == PatternType.IGNITION]
         
@@ -123,10 +122,10 @@ class TestIgnitionLogic:
             open_price=100, high=110, low=100, close=108,
             volume=1500,
             atr=2.0,
-            spot_slope=1.0, perp_slope=1.0
+            spot_slope=2.0, perp_slope=2.0
         )
         
-        candles = [prev_candle] * 20 + [prev_candle, curr_candle]
+        candles = [prev_candle] * 40 + [prev_candle, curr_candle]
         
         alerts = analyzer.analyze("BTCUSDT", candles)
         ignition = [a for a in alerts if a.pattern == PatternType.IGNITION]
@@ -142,10 +141,10 @@ class TestIgnitionLogic:
             open_price=108, high=110, low=100, close=100, # Bearish candle
             volume=1500,
             atr=2.0,
-            spot_slope=1.0, perp_slope=1.0 # Bullish Consensus
+            spot_slope=2.0, perp_slope=2.0 # Bullish Consensus
         )
         
-        candles = [prev_candle] * 20 + [prev_candle, curr_candle]
+        candles = [prev_candle] * 40 + [prev_candle, curr_candle]
         
         alerts = analyzer.analyze("BTCUSDT", candles)
         ignition = [a for a in alerts if a.pattern == PatternType.IGNITION]

@@ -13,6 +13,8 @@ from config.settings import (
 )
 import numpy as np
 import time
+from utils.snapshot_logger import write_snapshot
+from utils.event_snapshot import build_snapshot
 
 
 class Analyzer:
@@ -39,13 +41,23 @@ class Analyzer:
             return []
 
         current_candle = candles[-1]
-        regime = self._determine_regime(candles)
+        regime = self._determine_regime(candles, current_candle)
 
         alerts: List[Alert] = []
 
         # --- Pattern A: VWAP Reclaim ---
-        if self._check_vwap_reclaim(candles, regime):
-            score = self._calculate_score(PatternType.VWAP_RECLAIM, candles, regime)
+        if self._check_vwap_reclaim(candles, current_candle, regime):
+            score = self._calculate_score(PatternType.VWAP_RECLAIM, candles, current_candle, regime)
+            snapshot = build_snapshot(
+                symbol=symbol,
+                pattern=PatternType.VWAP_RECLAIM,
+                candle=current_candle,
+                regime=regime,
+                score=score,
+                passed=True,
+                debug_data=None,
+            )
+            write_snapshot(snapshot)
             if score >= MIN_ALERT_SCORE:
                 alerts.append(
                     self._create_alert(
@@ -54,8 +66,18 @@ class Analyzer:
                 )
 
         # --- Pattern B: Ignition ---
-        if self._check_ignition(candles, regime):
-            score = self._calculate_score(PatternType.IGNITION, candles, regime)
+        if self._check_ignition(candles, current_candle, regime):
+            score = self._calculate_score(PatternType.IGNITION, candles, current_candle, regime)
+            snapshot = build_snapshot(
+                symbol=symbol,
+                pattern=PatternType.IGNITION,
+                candle=current_candle,
+                regime=regime,
+                score=score,
+                passed=True,
+                debug_data=None,
+            )
+            write_snapshot(snapshot)
             if score >= MIN_ALERT_SCORE:
                 alerts.append(
                     self._create_alert(
@@ -64,8 +86,18 @@ class Analyzer:
                 )
 
         # --- Pattern C: Post-Impulse Pullback ---
-        if self._check_post_impulse_pullback(candles, regime):
-            score = self._calculate_score(PatternType.PULLBACK, candles, regime)
+        if self._check_post_impulse_pullback(candles, current_candle, regime):
+            score = self._calculate_score(PatternType.PULLBACK, candles, current_candle, regime)
+            snapshot = build_snapshot(
+                symbol=symbol,
+                pattern=PatternType.PULLBACK,
+                candle=current_candle,
+                regime=regime,
+                score=score,
+                passed=True,
+                debug_data=None,
+            )
+            write_snapshot(snapshot)
             if score >= MIN_ALERT_SCORE:
                 alerts.append(
                     self._create_alert(
@@ -74,9 +106,19 @@ class Analyzer:
                 )
 
         # --- Pattern D: Trap (Top/Bottom) ---
-        is_trap = self._check_trap(candles, regime)
+        is_trap = self._check_trap(candles, current_candle, regime)
         if is_trap:
-            score = self._calculate_score(PatternType.TRAP, candles, regime)
+            score = self._calculate_score(PatternType.TRAP, candles, current_candle, regime)
+            snapshot = build_snapshot(
+                symbol=symbol,
+                pattern=PatternType.TRAP,
+                candle=current_candle,
+                regime=regime,
+                score=score,
+                passed=True,
+                debug_data=None,
+            )
+            write_snapshot(snapshot)
             if score >= MIN_ALERT_SCORE:
                 alerts.append(
                     self._create_alert(
@@ -85,8 +127,18 @@ class Analyzer:
                 )
 
         # --- Pattern E: Failed Breakout (non-trap rejection) ---
-        if self._check_failed_breakout(candles, regime, already_trap=is_trap):
-            score = self._calculate_score(PatternType.FAILED_BREAKOUT, candles, regime)
+        if self._check_failed_breakout(candles, current_candle, regime, already_trap=is_trap):
+            score = self._calculate_score(PatternType.FAILED_BREAKOUT, candles, current_candle, regime)
+            snapshot = build_snapshot(
+                symbol=symbol,
+                pattern=PatternType.FAILED_BREAKOUT,
+                candle=current_candle,
+                regime=regime,
+                score=score,
+                passed=True,
+                debug_data=None,
+            )
+            write_snapshot(snapshot)
             if score >= MIN_ALERT_SCORE:
                 alerts.append(
                     self._create_alert(
@@ -99,14 +151,12 @@ class Analyzer:
     # ------------------------------------------------------------------
     # Flow Regime
     # ------------------------------------------------------------------
-    def _get_flow_slopes(self, candles: List[Candle]) -> Tuple[float, float]:
-        current = candles[-1]
+    def _get_flow_slopes(self, current: Candle) -> Tuple[float, float]:
         spot_slope = current.spot_cvd_slope if current.spot_cvd_slope is not None else 0.0
         perp_slope = current.perp_cvd_slope if current.perp_cvd_slope is not None else 0.0
         return float(spot_slope), float(perp_slope)
 
-    def _determine_regime(self, candles: List[Candle]) -> FlowRegime:
-        current = candles[-1]
+    def _determine_regime(self, candles: List[Candle], current: Candle) -> FlowRegime:
 
         # Volatility gate: ultra-low vol -> don't over-interpret flow
         if (
@@ -115,7 +165,7 @@ class Analyzer:
         ):
             return FlowRegime.NEUTRAL
 
-        spot_slope, perp_slope = self._get_flow_slopes(candles)
+        spot_slope, perp_slope = self._get_flow_slopes(current)
         thresh = FLOW_SLOPE_THRESHOLD
 
         # If both are tiny, it's just noise
@@ -176,8 +226,8 @@ class Analyzer:
             and c.low is not None
         )
 
-    def _bullish_flow_ok(self, candles: List[Candle], regime: FlowRegime) -> bool:
-        spot_slope, perp_slope = self._get_flow_slopes(candles)
+    def _bullish_flow_ok(self, candles: List[Candle], current: Candle, regime: FlowRegime) -> bool:
+        spot_slope, perp_slope = self._get_flow_slopes(current)
         if regime == FlowRegime.BULLISH_CONSENSUS:
             return True
         if regime == FlowRegime.SPOT_DOMINANT and spot_slope > 0:
@@ -186,8 +236,8 @@ class Analyzer:
             return True
         return False
 
-    def _bearish_flow_ok(self, candles: List[Candle], regime: FlowRegime) -> bool:
-        spot_slope, perp_slope = self._get_flow_slopes(candles)
+    def _bearish_flow_ok(self, candles: List[Candle], current: Candle, regime: FlowRegime) -> bool:
+        spot_slope, perp_slope = self._get_flow_slopes(current)
         if regime == FlowRegime.BEARISH_CONSENSUS:
             return True
         if regime == FlowRegime.SPOT_DOMINANT and spot_slope < 0:
@@ -199,11 +249,11 @@ class Analyzer:
     # ------------------------------------------------------------------
     # Pattern A: VWAP Reclaim
     # ------------------------------------------------------------------
-    def _check_vwap_reclaim(self, candles: List[Candle], regime: FlowRegime) -> bool:
+    def _check_vwap_reclaim(self, candles: List[Candle], curr: Candle, regime: FlowRegime) -> bool:
         if len(candles) < 2:
             return False
 
-        curr = candles[-1]
+        # curr is passed in
         prev = candles[-2]
 
         if not self._price_fields_ok(curr) or not self._price_fields_ok(prev):
@@ -240,10 +290,10 @@ class Analyzer:
             and self._is_directional_candle(curr)
         )
 
-        if bullish_reclaim and self._bullish_flow_ok(candles, regime):
+        if bullish_reclaim and self._bullish_flow_ok(candles, curr, regime):
             return True
 
-        if bearish_reclaim and self._bearish_flow_ok(candles, regime):
+        if bearish_reclaim and self._bearish_flow_ok(candles, curr, regime):
             return True
 
         return False
@@ -251,11 +301,11 @@ class Analyzer:
     # ------------------------------------------------------------------
     # Pattern B: Ignition
     # ------------------------------------------------------------------
-    def _check_ignition(self, candles: List[Candle], regime: FlowRegime) -> bool:
+    def _check_ignition(self, candles: List[Candle], curr: Candle, regime: FlowRegime) -> bool:
         if len(candles) < 7:  # cluster + current + a bit of context
             return False
 
-        curr = candles[-1]
+        # curr is passed in
         prev = candles[-2]
 
         if not self._price_fields_ok(curr) or not self._has_min_volume(curr):
@@ -301,9 +351,9 @@ class Analyzer:
                 return False
 
         # Flow alignment with actual direction
-        if is_bull and not self._bullish_flow_ok(candles, regime):
+        if is_bull and not self._bullish_flow_ok(candles, curr, regime):
             return False
-        if is_bear and not self._bearish_flow_ok(candles, regime):
+        if is_bear and not self._bearish_flow_ok(candles, curr, regime):
             return False
 
         return True
@@ -312,9 +362,9 @@ class Analyzer:
     # Pattern C: Post-Impulse Pullback
     # ------------------------------------------------------------------
     def _check_post_impulse_pullback(
-        self, candles: List[Candle], regime: FlowRegime
+        self, candles: List[Candle], curr: Candle, regime: FlowRegime
     ) -> bool:
-        curr = candles[-1]
+        # curr is passed in
         if not self._price_fields_ok(curr) or curr.vwap is None:
             return False
         if curr.atr is None or curr.atr <= 0:
@@ -367,12 +417,12 @@ class Analyzer:
             # Pullback should not be a hard breakdown below VWAP
             if curr.close < curr.vwap * (1 - self.VWAP_TOLERANCE * 3):
                 return False
-            if not self._bullish_flow_ok(candles, regime):
+            if not self._bullish_flow_ok(candles, curr, regime):
                 return False
         else:  # "down"
             if curr.close > curr.vwap * (1 + self.VWAP_TOLERANCE * 3):
                 return False
-            if not self._bearish_flow_ok(candles, regime):
+            if not self._bearish_flow_ok(candles, curr, regime):
                 return False
 
         return True
@@ -380,8 +430,8 @@ class Analyzer:
     # ------------------------------------------------------------------
     # Pattern D: Trap (Stop Run)
     # ------------------------------------------------------------------
-    def _check_trap(self, candles: List[Candle], regime: FlowRegime) -> bool:
-        curr = candles[-1]
+    def _check_trap(self, candles: List[Candle], curr: Candle, regime: FlowRegime) -> bool:
+        # curr is passed in
 
         lookback = SESSION_LOOKBACK_WINDOW
         history = candles[-lookback:] if len(candles) > lookback else candles
@@ -453,13 +503,13 @@ class Analyzer:
     # Pattern E: Failed Breakout (Non-trap)
     # ------------------------------------------------------------------
     def _check_failed_breakout(
-        self, candles: List[Candle], regime: FlowRegime, already_trap: bool
+        self, candles: List[Candle], curr: Candle, regime: FlowRegime, already_trap: bool
     ) -> bool:
         if already_trap:
             # Trap is a stronger pattern; don't double-report as failed breakout
             return False
 
-        curr = candles[-1]
+        # curr is passed in
 
         lookback = SESSION_LOOKBACK_WINDOW
         history = candles[-lookback:] if len(candles) > lookback else candles
@@ -522,9 +572,9 @@ class Analyzer:
     # Scoring
     # ------------------------------------------------------------------
     def _calculate_score(
-        self, pattern: PatternType, candles: List[Candle], regime: FlowRegime
+        self, pattern: PatternType, candles: List[Candle], current: Candle, regime: FlowRegime
     ) -> float:
-        current = candles[-1]
+        # current is passed in
         score = float(SCORING_WEIGHTS.get("BASE_PATTERN", 0.0))
 
         # Flow Alignment / Context
@@ -620,8 +670,9 @@ class Analyzer:
             return out
 
         # Determine flow regime with raw numbers included
-        regime = self._determine_regime(candles)
-        spot_slope, perp_slope = self._get_flow_slopes(candles)
+        current_candle = candles[-1]
+        regime = self._determine_regime(candles, current_candle)
+        spot_slope, perp_slope = self._get_flow_slopes(current_candle)
         out["flow_regime"] = {
             "regime": regime.value,
             "spot_slope": spot_slope,
@@ -638,7 +689,7 @@ class Analyzer:
 
         # --- Pattern debug functions -----------------------------------
         def dbg_vwap():
-            curr = candles[-1]
+            curr = current_candle
             prev = candles[-2]
 
             if curr.vwap is None or prev.vwap is None:
@@ -666,10 +717,10 @@ class Analyzer:
                 and self._is_directional_candle(curr)
             )
 
-            if bullish and not self._bullish_flow_ok(candles, regime):
+            if bullish and not self._bullish_flow_ok(candles, curr, regime):
                 return False, "Bullish reclaim but flow not bullish"
 
-            if bearish and not self._bearish_flow_ok(candles, regime):
+            if bearish and not self._bearish_flow_ok(candles, curr, regime):
                 return False, "Bearish reclaim but flow not bearish"
 
             if bullish or bearish:
@@ -678,7 +729,7 @@ class Analyzer:
             return False, "Conditions did not form valid reclaim"
 
         def dbg_ignition():
-            curr = candles[-1]
+            curr = current_candle
 
             if curr.atr is None or curr.atr <= 0:
                 return False, "Missing ATR"
@@ -713,16 +764,16 @@ class Analyzer:
                 if curr.close < curr.open and curr.close > curr.vwap:
                     return False, "Bearish candle but above VWAP"
 
-            if curr.close > curr.open and not self._bullish_flow_ok(candles, regime):
+            if curr.close > curr.open and not self._bullish_flow_ok(candles, curr, regime):
                 return False, "Bullish candle but flow not bullish"
 
-            if curr.close < curr.open and not self._bearish_flow_ok(candles, regime):
+            if curr.close < curr.open and not self._bearish_flow_ok(candles, curr, regime):
                 return False, "Bearish candle but flow not bearish"
 
             return True, "Ignition confirmed"
 
         def dbg_pullback():
-            curr = candles[-1]
+            curr = current_candle
 
             if curr.atr is None or curr.atr <= 0:
                 return False, "Missing ATR"
@@ -755,16 +806,16 @@ class Analyzer:
                 return False, "Not near VWAP"
 
             if impulse_dir == "up":
-                if not self._bullish_flow_ok(candles, regime):
+                if not self._bullish_flow_ok(candles, curr, regime):
                     return False, "Flow not bullish"
             else:
-                if not self._bearish_flow_ok(candles, regime):
+                if not self._bearish_flow_ok(candles, curr, regime):
                     return False, "Flow not bearish"
 
             return True, f"Pullback OK (dir={impulse_dir})"
 
         def dbg_trap():
-            curr = candles[-1]
+            curr = current_candle
             if not self._price_fields_ok(curr):
                 return False, "Missing candle fields"
 
@@ -799,7 +850,7 @@ class Analyzer:
             return False, "Conditions did not form trap"
 
         def dbg_failed():
-            curr = candles[-1]
+            curr = current_candle
 
             history = candles[-SESSION_LOOKBACK_WINDOW:]
             if len(history) < 10:
@@ -837,9 +888,78 @@ class Analyzer:
 
         # Attach results
         out["patterns"]["VWAP_RECLAIM"] = _dbg_wrapper("VWAP_RECLAIM", dbg_vwap)
+        res = out["patterns"]["VWAP_RECLAIM"]
+        if not res["ok"]:
+            snapshot = build_snapshot(
+                symbol=symbol,
+                pattern=PatternType.VWAP_RECLAIM,
+                candle=current_candle,
+                regime=regime,
+                score=0.0,
+                passed=False,
+                failed_reason=res["reason"],
+                debug_data=out,
+            )
+            write_snapshot(snapshot)
+
         out["patterns"]["IGNITION"] = _dbg_wrapper("IGNITION", dbg_ignition)
+        res = out["patterns"]["IGNITION"]
+        if not res["ok"]:
+            snapshot = build_snapshot(
+                symbol=symbol,
+                pattern=PatternType.IGNITION,
+                candle=current_candle,
+                regime=regime,
+                score=0.0,
+                passed=False,
+                failed_reason=res["reason"],
+                debug_data=out,
+            )
+            write_snapshot(snapshot)
+
         out["patterns"]["PULLBACK"] = _dbg_wrapper("PULLBACK", dbg_pullback)
-        out["patterns"]["TRAP"] = _dbg_wrapper("TRAP", dbg_trap)
+        res = out["patterns"]["PULLBACK"]
+        if not res["ok"]:
+            snapshot = build_snapshot(
+                symbol=symbol,
+                pattern=PatternType.PULLBACK,
+                candle=current_candle,
+                regime=regime,
+                score=0.0,
+                passed=False,
+                failed_reason=res["reason"],
+                debug_data=out,
+            )
+            write_snapshot(snapshot)
+
+        out["patterns"]["TRAP"] = _dbg_wrapper("TRAP", dbg_trap)   
+        res = out["patterns"]["TRAP"]
+        if not res["ok"]:
+            snapshot = build_snapshot(
+                symbol=symbol,
+                pattern=PatternType.TRAP,
+                candle=current_candle,
+                regime=regime,
+                score=0.0,
+                passed=False,
+                failed_reason=res["reason"],
+                debug_data=out,
+            )
+            write_snapshot(snapshot)
+
         out["patterns"]["FAILED_BREAKOUT"] = _dbg_wrapper("FAILED_BREAKOUT", dbg_failed)
+        res = out["patterns"]["FAILED_BREAKOUT"]
+        if not res["ok"]:
+            snapshot = build_snapshot(
+                symbol=symbol,
+                pattern=PatternType.FAILED_BREAKOUT,
+                candle=current_candle,
+                regime=regime,
+                score=0.0,
+                passed=False,
+                failed_reason=res["reason"],
+                debug_data=out,
+            )
+            write_snapshot(snapshot)
 
         return out
