@@ -37,3 +37,4 @@ wheels/
 debug*
 
 #other
+*.csv
