@@ -77,7 +77,7 @@ class TestFailedBreakoutFix:
         candles.append(current_candle)
         
         # Sanity check: Ensure regime IS Bullish Consensus
-        regime = self.analyzer._determine_regime(candles)
+        regime = self.analyzer._determine_regime(candles, candles[-1])
         assert regime == FlowRegime.BULLISH_CONSENSUS, "Setup failed: Regime should be BULLISH_CONSENSUS"
         
         # 3. Analyze
@@ -121,7 +121,7 @@ class TestFailedBreakoutFix:
         candles.append(current_candle)
         
         # Sanity check
-        regime = self.analyzer._determine_regime(candles)
+        regime = self.analyzer._determine_regime(candles, candles[-1])
         assert regime == FlowRegime.NEUTRAL
         
         # 3. Analyze
