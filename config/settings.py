@@ -5,7 +5,7 @@ SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT", 
     "XRPUSDT", "ADAUSDT", "MATICUSDT", "LTCUSDT", "AVAXUSDT",
     "XLMUSDT", "ZECUSDT", "FILUSDT", "AAVEUSDT", "LINKUSDT",
-    "XPLUSDT", "NEARUSDT", "STBLUSDT", "WLFIUSDT", "LINEAUSDT",
+    "XPLUSDT", "NEARUSDT", "PEPEUSDT", "WLFIUSDT", "LINEAUSDT",
 ]
 
 # Timeframes
@@ -13,6 +13,9 @@ TIMEFRAME_1M = "1m"
 TIMEFRAME_3M = "3m"
 TIMEFRAME_5M = "5m"
 TIMEFRAME_15M = "15m"
+
+# Candle timeframe (minutes)
+CANDLE_TIMEFRAME_MINUTES = 3
 
 # Websocket URLs
 BINANCE_SPOT_WS_URL = "wss://stream.binance.com:9443/ws"
@@ -43,7 +46,12 @@ SCORING_WEIGHTS = {
 
 # Logging
 LOG_LEVEL = "INFO"
+LOG_FILE = "utils/scanner.log"
+DEBUG_LOG_FILE = "utils/debug_scanner.log"
 
 # Flow Thresholds
-FLOW_SLOPE_THRESHOLD = 0.5 # Minimum slope to consider significant
+BASE_FLOW_SLOPE_THRESHOLD_1M = 0.5
+FLOW_SLOPE_THRESHOLD = BASE_FLOW_SLOPE_THRESHOLD_1M * CANDLE_TIMEFRAME_MINUTES # Dynamic scaling per timeframe
 
+# Debug mode for analyzer
+ANALYZER_DEBUG = True   # Set False for production

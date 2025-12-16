@@ -3,6 +3,7 @@ from models.types import Trade, Candle, StatusSink
 from utils.logger import setup_logger
 import math
 from time import time
+from config.settings import CANDLE_TIMEFRAME_MINUTES
 
 logger = setup_logger("DataProcessor")
 
@@ -19,9 +20,11 @@ class DataProcessor:
         Ingest a trade, update the current candle. 
         Returns a Candle if a candle just closed (for the PREVIOUS minute), else None.
         """
+        assert trade is not None
+        assert trade.timestamp is not None
         symbol = trade.symbol
-        timestamp_s = trade.timestamp / 1000.0
-        minute_start_ms = int(timestamp_s // 60) * 60 * 1000
+        tf_ms = CANDLE_TIMEFRAME_MINUTES * 60 * 1000
+        minute_start_ms = (trade.timestamp // tf_ms) * tf_ms
         
         closed_candle = None
         
@@ -42,7 +45,9 @@ class DataProcessor:
         else:
             # First candle for this symbol
             self.active_candles[symbol] = self._create_new_candle(trade, minute_start_ms, trade.price)
-        self.status_sink.tick()
+        if closed_candle:
+            self.status_sink.tick()
+
         return closed_candle
 
     def _create_new_candle(self, trade: Trade, timestamp: int, open_price: float) -> Candle:
@@ -82,6 +87,24 @@ class DataProcessor:
         # Keep last 1000 candles to prevent memory leak in MVP
         if len(self.history[symbol]) > 1000:
             self.history[symbol].pop(0)
+
+    def update_history_candle(self, symbol: str, new_candle: Candle):
+        """
+        Replaces a candle in history with a reconciled version (e.g. from API).
+        Preserves the CVD from the local version if the new version has 0.
+        """
+        if symbol not in self.history:
+            return
+
+        for i, c in enumerate(self.history[symbol]):
+            if c.timestamp == new_candle.timestamp:
+                # Preserve locally calculated CVD since REST API doesn't have it
+                new_candle.spot_cvd = c.spot_cvd
+                new_candle.perp_cvd = c.perp_cvd
+                
+                self.history[symbol][i] = new_candle
+                logger.debug(f"Reconciled candle for {symbol} at {new_candle.timestamp}")
+                return
 
     def get_history(self, symbol: str) -> List[Candle]:
         return self.history.get(symbol, [])

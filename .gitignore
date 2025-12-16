@@ -6,6 +6,8 @@ __pycache__/
 # Virtual Environment
 venv/
 .venv/
+venv-linux/
+.venv-linux/
 env/
 .env
 
@@ -32,4 +34,6 @@ wheels/
 
 # Logs
 *.log
+debug*
 
+#other

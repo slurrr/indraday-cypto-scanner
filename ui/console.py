@@ -1,14 +1,11 @@
-from rich.console import Console
 from rich.table import Table
-from rich.live import Live
 from rich.layout import Layout
-from time import sleep
+import threading
 from typing import List
 import pandas as pd
 from models.types import Alert, FlowRegime
 from dataclasses import dataclass
 from time import time
-#from main import ui
 from rich.panel import Panel
 from rich.text import Text
 from rich.layout import Layout
@@ -23,6 +20,7 @@ class UIStatus:
     last_tick_ts: float | None = None
     total_alerts: int = 0
     last_error: str | None = None
+    binance_client: "BinanceClient | None" = None
 
 class ConsoleUI():
     def __init__(self, console):
@@ -31,6 +29,7 @@ class ConsoleUI():
         self.alerts: List[Alert] = []
         self.dirty = False 
         self.status = UIStatus()
+        self.lock = threading.Lock()
 
     def feed_connected(self):
         self.status.feed_connected = True
@@ -48,8 +47,9 @@ class ConsoleUI():
         self.dirty = True
         
     def add_alert(self, alert: Alert):
-        self.alerts.insert(0, alert)
-        self.alerts = self.alerts[:50]
+        with self.lock:
+            self.alerts.insert(0, alert)
+            self.alerts = self.alerts[:50]
         self.alert_fired()
         self.dirty = True
 
@@ -84,6 +84,14 @@ class ConsoleUI():
         # Alerts
         items.append(f"[magenta]Alerts:[/] {self.status.total_alerts}")
 
+        # WS Metrics
+        if self.status.binance_client:
+            ws_metrics = self.status.binance_client.get_ws_metrics()
+            items.append(
+                f"[blue]WS Messages:[/] {ws_metrics.get('total', 0)} "
+                f"(dropped {ws_metrics.get('dropped', 0)} {ws_metrics.get('drop_pct', 0.0):.2f}%)"
+            )
+
         # Error (if any)
         if self.status.last_error:
             items.append(f"[red]Error:[/] {self.status.last_error}")
@@ -97,6 +105,7 @@ class ConsoleUI():
             Layout(self.generate_table(), name="table", ratio=4),
             Layout(self.generate_status_panel(), name="status", size=3),
         )
+        self.layout = layout
         return layout
 
     def generate_table(self) -> Table:
@@ -108,7 +117,11 @@ class ConsoleUI():
         table.add_column("Regime", justify="center")
         table.add_column("Score", justify="right")
         
-        for alert in self.alerts:
+        with self.lock:
+            # Copy alerts safely to minimize lock time during rendering layout
+            current_alerts = self.alerts[:]
+
+        for alert in current_alerts:
             # Color code regime
             regime_style = "white"
             if alert.flow_regime == FlowRegime.BULLISH_CONSENSUS:
@@ -137,4 +150,12 @@ class ConsoleUI():
                 str(alert.score)
             )
         return table
+
+    def update_table(self):
+        assert hasattr(self, "layout")
+        self.layout["table"].update(self.generate_table())
+
+    def update_status(self):
+        assert hasattr(self, "layout")
+        self.layout["status"].update(self.generate_status_panel())
 
