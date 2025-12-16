@@ -83,7 +83,7 @@ class BinanceClient:
                 quantity=float(data['q']),
                 timestamp=int(data['T']),
                 is_buyer_maker=data['m'],
-                source='spot'
+                source='perp'
             )
         except (KeyError, TypeError, ValueError):
             self.metrics["ws_messages_dropped"] += 1
