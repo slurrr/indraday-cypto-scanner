@@ -37,3 +37,4 @@ wheels/
 debug*
 
 #other
+utils/event_snapshots.jsonl
