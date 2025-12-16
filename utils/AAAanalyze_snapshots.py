@@ -1,88 +1,90 @@
 import json
 from pathlib import Path
+import pandas as pd
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from collections import Counter
 
-import pandas as pd
-
-# =============================================================================
-# CONFIG
-# =============================================================================
-
-SNAPSHOT_PATH = Path("utils/event_snapshots.jsonl")
-OUT_DIR = Path("utils/review")
-OUT_DIR.mkdir(parents=True, exist_ok=True)
-
 DENVER = ZoneInfo("America/Denver")
 
+def tradingview_url(symbol: str, bar_time_ms: int, interval="3"):
+    # TradingView uses seconds
+    ts = int(bar_time_ms // 1000)
+    tv_symbol = f"BINANCE:{symbol}"
+    return (
+        "https://www.tradingview.com/chart/?"
+        f"symbol={tv_symbol}&interval={interval}&time={ts}"
+    )
+
+SNAPSHOT_PATH = Path("utils/event_snapshots.jsonl") 
+IGNITION_LOOKAHEAD = 8          # candles
+IGNITION_MIN_R = 0.75           # minimum favorable move in R
+IGNITION_MAX_ADVERSE_R = -0.5   # fail if this hit first
+# --- verdict contract ---
 PASS = "PASS"
 FAIL = "FAIL"
 REVIEW = "REVIEW"
 ALLOWED_VERDICTS = {PASS, FAIL, REVIEW}
 
-# =============================================================================
-# HELPERS
-# =============================================================================
-
-def tradingview_url(symbol: str, bar_time_ms: int, interval="3"):
-    ts = int(bar_time_ms // 1000)
-    return (
-        "https://www.tradingview.com/chart/?"
-        f"symbol=BINANCE:{symbol}&interval={interval}&time={ts}"
-    )
-
-# =============================================================================
-# VERIFIERS (UNCHANGED SEMANTICS)
-# =============================================================================
-
 def auto_verify(row):
+    """
+    Returns: (auto_verdict, auto_notes)
+    auto_verdict ∈ {"PASS", "FAIL", "REVIEW"}
+    """
     pattern = row.get("pattern")
-    fn = VERIFIERS.get(pattern)
 
+    fn = VERIFIERS.get(pattern)
     if not fn:
         return REVIEW, f"Unknown pattern: {pattern}"
 
     verdict, notes = fn(row)
 
+    # hard guard so bad returns never silently poison your CSV
     if verdict not in ALLOWED_VERDICTS:
-        return REVIEW, f"Verifier bug: {pattern} returned {verdict!r}"
+        return REVIEW, f"Verifier bug: {pattern} returned invalid verdict={verdict!r}"
 
     return verdict, notes
-
-
-# ---------------- IGNITION ----------------
 
 def auto_verify_ignition(row):
     """
     IGNITION = sudden expansion in range + energy.
     Direction-agnostic. VWAP is context only.
     """
+
+    # --- Hard FAILS ---
     if row["atr"] is None or row["atr"] <= 0:
-        return FAIL, "ATR missing"
+        return "FAIL", "ATR missing"
 
     if row["high"] is None or row["low"] is None:
-        return FAIL, "OHLC incomplete"
+        return "FAIL", "OHLC incomplete"
 
-    if (row["high"] - row["low"]) < 0.5 * row["atr"]:
-        return FAIL, "Range too small"
+    candle_range = row["high"] - row["low"]
 
-    ap = row.get("atr_percentile")
-    if ap is not None and ap < 25:
-        return FAIL, "Low volatility regime"
+    if candle_range < 0.5 * row["atr"]:
+        return "FAIL", "Range too small for ignition"
 
-    tags = ["Above VWAP" if row["close_vs_vwap"] >= 0 else "Below VWAP"]
+    if row["atr_percentile"] is not None and row["atr_percentile"] < 25:
+        return "FAIL", "Low volatility regime"
 
-    if ap is not None and ap > 95:
-        return REVIEW, "Extreme volatility; " + "; ".join(tags)
+    # --- Context (non-blocking tags) ---
+    tags = []
 
-    if abs(row.get("flow_bias", 0)) < 1e-6:
-        return REVIEW, "Weak flow impulse; " + "; ".join(tags)
+    tags.append("Below VWAP" if row["close_vs_vwap"] < 0 else "Above VWAP")
 
-    return PASS, "; ".join(tags)
+    # --- Review-worthy flags ---
+    review_flags = []
 
+    if row["atr_percentile"] is not None and row["atr_percentile"] > 95:
+        review_flags.append("Extreme volatility")
 
-# ---------------- VWAP RECLAIM ----------------
+    if abs(row["flow_bias"]) < 1e-6:
+        review_flags.append("Weak flow impulse")
+
+    if review_flags:
+        return "REVIEW", "; ".join(review_flags + tags)
+
+    # --- Clean ignition ---
+    return "PASS", "; ".join(tags)
 
 def auto_verify_vwap_reclaim(row):
     """
@@ -91,37 +93,90 @@ def auto_verify_vwap_reclaim(row):
       - bullish reclaim: prev below -> now above
       - bearish reclaim: prev above -> now below
     """
-    if row["vwap"] is None or row["close"] is None:
-        return FAIL, "VWAP/close missing"
+
+    # --- Hard FAILS ---
+    if row.get("vwap") is None:
+        return FAIL, "VWAP missing"
+    if row.get("close") is None:
+        return FAIL, "Close missing"
+    if row.get("atr") is None or row.get("atr") <= 0:
+        return FAIL, "ATR missing"
 
     bars = row["_bars"]
     sym = row["symbol"]
     t = row["bar_time"]
 
+    # Build a candle-series for this symbol (dedupe bar_time because df has 1 row per pattern)
     cdf = (
         bars[bars["symbol"] == sym]
-        .drop_duplicates("bar_time", keep="last")
+        .drop_duplicates(subset=["bar_time"], keep="last")
         .sort_values("bar_time")
         .reset_index(drop=True)
     )
 
-    idx = cdf.index[cdf["bar_time"] == t]
-    if idx.empty or idx[0] == 0:
-        return REVIEW, "Insufficient context"
+    # Find current bar position
+    idx_list = cdf.index[cdf["bar_time"] == t].tolist()
+    if not idx_list:
+        return REVIEW, "Current bar not found in series"
+    i = idx_list[0]
 
-    prev, curr = cdf.iloc[idx[0] - 1], cdf.iloc[idx[0]]
+    if i == 0:
+        return REVIEW, "No previous bar to confirm reclaim"
 
-    prev_d = prev["close"] - prev["vwap"]
-    curr_d = curr["close"] - curr["vwap"]
+    prev = cdf.iloc[i - 1]
+    curr = cdf.iloc[i]
 
-    crossed_up = prev_d <= 0 and curr_d > 0
-    crossed_dn = prev_d >= 0 and curr_d < 0
+    prev_delta = (prev["close"] - prev["vwap"]) if pd.notna(prev["close"]) and pd.notna(prev["vwap"]) else None
+    curr_delta = (curr["close"] - curr["vwap"]) if pd.notna(curr["close"]) and pd.notna(curr["vwap"]) else None
 
-    if not (crossed_up or crossed_dn):
+    if prev_delta is None or curr_delta is None:
+        return REVIEW, "VWAP/close incomplete in series"
+
+    # Must actually cross VWAP
+    crossed_up = (prev_delta <= 0) and (curr_delta > 0)
+    crossed_down = (prev_delta >= 0) and (curr_delta < 0)
+
+    if not (crossed_up or crossed_down):
         return FAIL, "No VWAP cross"
 
     direction = "BULL_RECLAIM" if crossed_up else "BEAR_RECLAIM"
-    return PASS, direction
+
+    # Strength filter: reclaim should be meaningfully away from VWAP (avoid tiny wiggles)
+    atr = row["atr"]
+    min_dist = 0.05 * atr  # tweak later if needed
+    if abs(curr_delta) < min_dist:
+        return REVIEW, f"Weak reclaim distance (< {min_dist:.4f})"
+
+    # Optional volatility sanity: if you're in a dead regime, reclaim signals are often garbage
+    ap = row.get("atr_percentile")
+    if ap is not None and ap < 15:
+        return FAIL, "Very low volatility regime"
+
+    tags = [direction, ("Above VWAP" if curr_delta > 0 else "Below VWAP")]
+
+    # Hold confirmation: next bar should stay on the new side (1-bar hold)
+    if i + 1 >= len(cdf):
+        return REVIEW, "No lookahead bar to confirm hold"
+
+    nxt = cdf.iloc[i + 1]
+    nxt_delta = (nxt["close"] - nxt["vwap"]) if pd.notna(nxt["close"]) and pd.notna(nxt["vwap"]) else None
+    if nxt_delta is None:
+        return REVIEW, "Next bar missing VWAP/close"
+
+    held = (curr_delta > 0 and nxt_delta > 0) or (curr_delta < 0 and nxt_delta < 0)
+    if not held:
+        return REVIEW, "Crossed VWAP but did not hold next bar; likely chop/whipsaw"
+
+    # Flow context (non-blocking): just annotate
+    fb = row.get("flow_bias")
+    if fb is not None:
+        if direction == "BULL_RECLAIM" and fb < 0:
+            tags.append("Flow contradicts (perp>spot)")
+        if direction == "BEAR_RECLAIM" and fb > 0:
+            tags.append("Flow contradicts (spot>perp)")
+
+    return PASS, "; ".join(tags)
+
 
 def auto_verify_trap(row):
     """
@@ -400,9 +455,6 @@ def auto_verify_failed_breakout(row):
             return PASS, "; ".join(tags)
         return REVIEW, "Break failed but no follow-through rejection"
 
-# =============================================================================
-# VERIFIER MAP
-# =============================================================================
 
 VERIFIERS = {
     "IGNITION": auto_verify_ignition,
@@ -412,25 +464,31 @@ VERIFIERS = {
     "FAILED_BREAKOUT": auto_verify_failed_breakout,
 }
 
-# =============================================================================
-# PIPELINE
-# =============================================================================
 
 rows = []
-
+bad = 0
 with SNAPSHOT_PATH.open("r", encoding="utf-8-sig", errors="replace") as f:
-    for line in f:
+    for i, line in enumerate(f, start=1):
         line = line.strip()
-        if not line or not line.startswith("{"):
+        if not line:
             continue
-
-        s = json.loads(line)
+        if not (line.startswith("{") and line.endswith("}")):
+            if bad < 3:
+                print(f"[WARN] Non-JSON line {i}: {line[:120]}")
+            bad += 1
+            continue
+        try:
+            s = json.loads(line)
+        except json.JSONDecodeError as e:
+            if bad < 3:
+                print(f"[WARN] JSON error line {i}: {e}")
+            bad += 1
+            continue
 
         meta = s.get("meta", {})
         candle = s.get("candle", {})
         flow = s.get("flow", {})
         patterns = (s.get("analysis", {}) or {}).get("patterns", {}) or {}
-
         meta_pat = meta.get("pattern")
         if meta_pat and meta_pat not in patterns:
             patterns[meta_pat] = {
@@ -438,14 +496,22 @@ with SNAPSHOT_PATH.open("r", encoding="utf-8-sig", errors="replace") as f:
                 "reason": meta.get("failed_reason") or "",
             }
 
-        for pat, obj in patterns.items():
+        for pat_name, pat_obj in patterns.items():
+            ok = pat_obj.get("ok")
+            reason = pat_obj.get("reason") or ""
+
             rows.append({
                 "logged_at": meta.get("logged_at") or s.get("logged_at"),
                 "bar_time": meta.get("bar_time"),
                 "symbol": meta.get("symbol"),
-                "pattern": pat,
-                "ok": obj.get("ok"),
-                "reason": obj.get("reason") or "",
+                "pattern": pat_name,
+                "ok": ok,
+                "reason": reason,
+
+                "flow_regime": (meta.get("flow_regime")
+                               or (s.get("analysis", {}) or {}).get("flow_regime", {}).get("regime")),
+                "spot_cvd_slope": flow.get("spot_cvd_slope"),
+                "perp_cvd_slope": flow.get("perp_cvd_slope"),
 
                 "open": candle.get("open"),
                 "high": candle.get("high"),
@@ -455,81 +521,198 @@ with SNAPSHOT_PATH.open("r", encoding="utf-8-sig", errors="replace") as f:
                 "atr": candle.get("atr"),
                 "atr_percentile": candle.get("atr_percentile"),
                 "volume": candle.get("volume"),
-
-                "spot_cvd_slope": flow.get("spot_cvd_slope"),
-                "perp_cvd_slope": flow.get("perp_cvd_slope"),
             })
-
+           
+print("RAW ROW COUNTS BY PATTERN:")
+print(Counter(r["pattern"] for r in rows))
 df = pd.DataFrame(rows)
+
+# --- de-duplicate decisions ---
+before = len(df)
 
 df = (
     df.sort_values("logged_at")
-      .drop_duplicates(["symbol", "bar_time", "pattern"], keep="last")
+      .drop_duplicates(
+          subset=["symbol", "bar_time", "pattern"],
+          keep="last"
+      )
       .reset_index(drop=True)
+)
+print("POST-DEDUP COUNTS BY PATTERN:")
+print(df["pattern"].value_counts())
+print(f"\nDe-duplicated rows: {before} -> {len(df)}")
+
+df["bar_time_hms"] = df["bar_time"].apply(
+    lambda ms: datetime.utcfromtimestamp(ms / 1000).strftime("%H:%M:%S")
+    if pd.notna(ms) else None
 )
 
 df["_alert_ts"] = pd.to_datetime(df["logged_at"], errors="coerce")
-df["alert_date"] = df["_alert_ts"].dt.strftime("%m/%d/%Y")
-df["alert_time"] = df["_alert_ts"].dt.strftime("%H:%M:%S")
 
+print("Sample logged_at raw:", df["logged_at"].dropna().iloc[0])
+print("Sample _alert_ts (UTC):", df["_alert_ts"].dropna().iloc[0])
+
+df["alert_time_denver"] = (
+    df["_alert_ts"]
+    .dt.tz_localize("UTC")
+    .dt.tz_convert(DENVER)
+    .dt.strftime("%H:%M:%S")
+)
+
+ts = pd.to_datetime(df["logged_at"], errors="coerce")
+
+df["alert_date"] = ts.dt.strftime("%m/%d/%Y")
+df["alert_time"] = ts.dt.strftime("%H:%M:%S")
+
+# Derived helpers
 df["close_vs_vwap"] = df["close"] - df["vwap"]
 df["flow_bias"] = df["spot_cvd_slope"] - df["perp_cvd_slope"]
 
-# Build a clean candle series (1 row per symbol+bar_time)
-bars = (
-    df.drop_duplicates(subset=["symbol", "bar_time"], keep="last")
-      .sort_values(["symbol", "bar_time"])
-      .reset_index(drop=True)
-)
-
-
-df["tv_link"] = df.apply(
-    lambda r: f'=HYPERLINK("{tradingview_url(r["symbol"], r["bar_time"])}","OPEN")',
+df["tv_url"] = df.apply(
+    lambda r: tradingview_url(r["symbol"], r["bar_time"]),
     axis=1
 )
 
-# ---- VERIFY ONCE ----
+df["tv_link"] = df["tv_url"].apply(
+    lambda u: f'=HYPERLINK("{u}", "OPEN")'
+)
 
 def verify_row(r):
     row = r.to_dict()
-    row["_bars"] = bars
+
+    # 🔒 private verifier context
+    row["_bars"] = df
+    row["_bar_index"] = r.name
+
     return pd.Series(auto_verify(row))
 
 df[["auto_verdict", "auto_notes"]] = df.apply(verify_row, axis=1)
 
-# =============================================================================
-# EXPORT
-# =============================================================================
+df["verdict"] = ""        # GOOD / BAD / MAYBE
+df["notes"] = ""          # quick reason
 
-is_triggered = df["ok"] == True
-is_almost = (df["ok"] == False) & (df["reason"] != "")
+out_dir = Path("utils/review")
+out_dir.mkdir(parents=True, exist_ok=True)
 
 review_cols = [
-    "alert_date", "alert_time",
-    "symbol", "pattern",
-    "ok", "reason",
     "auto_verdict", "auto_notes",
-    "atr_percentile",
-    "close_vs_vwap",
-    "flow_bias",
+    "verdict", "notes",
+    "alert_date", "alert_time_denver", 
+    "bar_time_hms", "symbol", "pattern",
+    "flow_regime", "atr_percentile",
+    "close_vs_vwap", "flow_bias",
     "volume", "close",
     "tv_link",
 ]
 
-for pat in sorted(df["pattern"].unique()):
+
+
+# ---- TRIGGERED (passed: true) ----
+#triggers = df[df["ok"] == True]
+
+ALMOST_MASK = (
+    (df["ok"] == False) &
+    (df["reason"].notna()) &
+    (df["reason"] != "")
+)
+
+for pat in patterns:
     pat_df = df[df["pattern"] == pat]
 
-    trg = pat_df[is_triggered]
-    alm = pat_df[is_almost]
+    triggers = pat_df[pat_df["ok"] == True].copy()
+    almost = pat_df[ALMOST_MASK].copy()
 
-    if not trg.empty:
-        p = OUT_DIR / f"TRIGGERED_{pat}.csv"
-        trg.sort_values("_alert_ts")[review_cols].to_csv(p, index=False)
-        print(f"[WRITE] {p} ({len(trg)})")
+    # Run your existing verifier (expects a row), don't pass extra args.
+    if not triggers.empty:
+        triggers[["auto_verdict", "auto_notes"]] = triggers.apply(
+            verify_row, axis=1, result_type="expand"
+        )
+    if not almost.empty:
+        almost[["auto_verdict", "auto_notes"]] = almost.apply(
+            verify_row, axis=1, result_type="expand"
+        )
 
-    if not alm.empty:
-        p = OUT_DIR / f"ALMOST_{pat}.csv"
-        alm.sort_values("_alert_ts")[review_cols].to_csv(p, index=False)
-        print(f"[WRITE] {p} ({len(alm)})")
+    print(f"\n=== {pat} ===")
+    print(f"Triggered: {len(triggers)} | Almost: {len(almost)}")
 
-print("\nDONE.")
+    if not triggers.empty:
+        print("-- Triggered auto_verdict --")
+        print(triggers["auto_verdict"].value_counts(dropna=False))
+
+    if not almost.empty:
+        print("-- Almost blocking reasons (top 8) --")
+        print(almost["reason"].value_counts().head(8))
+        print("-- Almost auto_verdict --")
+        print(almost["auto_verdict"].value_counts(dropna=False))
+
+
+
+
+
+
+# ---- flags ----
+df["passed"] = df["ok"]  # pattern-level ok
+df["meta_passed"] = df["pattern"].map(
+    df.groupby(["logged_at", "symbol"])["ok"].max()
+)
+
+for pat, g in triggers.groupby("pattern"):
+    p = out_dir / f"TRIGGERED_{pat}.csv"
+    g.sort_values("_alert_ts")[review_cols].to_csv(p, index=False)
+    print(f"[WRITE] {p} ({len(g)})")
+
+for pat, g in almost.groupby("pattern"):
+    p = out_dir / f"ALMOST{pat}.csv"
+    g.sort_values("_alert_ts")[review_cols].to_csv(p, index=False)
+    print(f"[WRITE] {p} ({len(g)})")
+
+print("\n=== TRIGGERED SIGNALS ===")
+print("Count:", len(triggers))
+
+print("\nTriggered by pattern:")
+print(triggers["pattern"].value_counts())
+
+
+
+
+print("\n========== FAILED_BREAKOUT (TRIGGERED ONLY) ==========")
+
+fb = triggers[triggers["pattern"] == "FAILED_BREAKOUT"]
+
+if fb.empty:
+    print("NO FAILED_BREAKOUT TRIGGERED")
+else:
+    print(f"Triggered FAILED_BREAKOUT count: {len(fb)}")
+
+    print("\n-- Verdict Counts --")
+    print(fb["auto_verdict"].value_counts(dropna=False))
+
+    print("\n-- Core Stats --")
+    cols = ["score", "atr", "atr_percentile"]
+    cols = [c for c in cols if c in fb.columns]
+    print(fb[cols].describe(percentiles=[0.25, 0.5, 0.75]).round(4))
+
+
+
+
+
+
+print("\nTriggered sample (sanity view):")
+cols = [
+    "logged_at", "symbol", "pattern",
+    "flow_regime", "atr_percentile",
+    "close_vs_vwap", "flow_bias"
+]
+print(triggers[cols].head(20).to_string(index=False))
+
+# ---- ALMOST (passed: false) ----
+almost = df[df["ok"] == False]
+
+print("\n=== ALMOST SIGNALS (REJECTED) ===")
+print("Count:", len(almost))
+
+print("\nTop rejection reasons:")
+print(almost["reason"].value_counts().head(15))
+
+print("\nRejections by pattern:")
+print(almost.groupby("pattern")["reason"].count().sort_values(ascending=False))
