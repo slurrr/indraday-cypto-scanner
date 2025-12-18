@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-from typing import List
+from typing import List, Optional
 from models.types import Candle
 from config.settings import ATR_WINDOW, ATR_PERCENTILE_WINDOW
 
@@ -88,7 +88,7 @@ def calculate_atr_percentile(atrs: List[float], period: int = ATR_PERCENTILE_WIN
         
     return percentiles
 
-def update_indicators(candles: List[Candle], atr_period: int = ATR_WINDOW):
+def update_indicators(candles: List[Candle], atr_period: int = ATR_WINDOW, context: Optional["TimeframeContext"] = None):
     """
     Batch update indicators for the whole history and attach to objects.
     Optimization: In a real system we would update incrementally.

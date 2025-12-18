@@ -8,8 +8,12 @@ from config.settings import CANDLE_TIMEFRAME_MINUTES
 logger = setup_logger("DataProcessor")
 
 class DataProcessor:
-    def __init__(self, status_sink: StatusSink):
+    def __init__(self, status_sink: StatusSink, context: Optional["TimeframeContext"] = None):
         self.status_sink = status_sink
+        # Default to 3m/180000ms if not provided (transition period)
+        from config.settings import CANDLE_TIMEFRAME_MINUTES
+        self.tf_ms = int(context.interval_ms) if context else int(CANDLE_TIMEFRAME_MINUTES * 60 * 1000)
+        
         # symbol -> current_candle (Candle)
         self.active_candles: Dict[str, Candle] = {}
         # symbol -> history of candles (list)
@@ -23,8 +27,9 @@ class DataProcessor:
         assert trade is not None
         assert trade.timestamp is not None
         symbol = trade.symbol
-        tf_ms = CANDLE_TIMEFRAME_MINUTES * 60 * 1000
-        minute_start_ms = (trade.timestamp // tf_ms) * tf_ms
+        
+        # Use stored timeframe interval
+        minute_start_ms = (trade.timestamp // self.tf_ms) * self.tf_ms
         
         closed_candle = None
         

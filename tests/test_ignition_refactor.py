@@ -64,6 +64,7 @@ class TestIgnitionLogic:
         
         # Verify Positive Case
         alerts = analyzer.analyze("BTCUSDT", candles)
+        ignition = [a for a in alerts if a.pattern == PatternType.IGNITION]
         assert len(ignition) == 1, "Should detect valid bullish ignition"
         
     def test_ignition_rejects_conflict_regime(self):

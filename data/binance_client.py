@@ -2,7 +2,7 @@ import json
 import threading
 import time
 import websocket
-from typing import Callable, List, Dict
+from typing import Callable, List, Dict, Optional
 from config.settings import BINANCE_SPOT_WS_URL, BINANCE_PERP_WS_URL, CANDLE_TIMEFRAME_MINUTES
 from models.types import Trade, Candle, StatusSink
 from utils.logger import setup_logger
@@ -130,7 +130,7 @@ class BinanceClient:
         ws.send(json.dumps(subscribe_msg))
         logger.info(f"Subscribed to {len(self.symbols)} symbols")
 
-    def fetch_historical_candles(self, lookback_bars: int = 1000) -> Dict[str, List[Candle]]:
+    def fetch_historical_candles(self, lookback_bars: int = 1000, context: Optional["TimeframeContext"] = None) -> Dict[str, List[Candle]]:
         """
         Fetch historical klines for all symbols via REST API to initialize history.
         Uses Binance Spot API.
@@ -140,12 +140,15 @@ class BinanceClient:
         
         base_url = "https://api.binance.com/api/v3/klines"
         
+        # Use context interval if available
+        interval = f"{int(context.interval_ms // 60000)}m" if context else f"{CANDLE_TIMEFRAME_MINUTES}m"
+
         for index, symbol in enumerate(self.symbols):
             try:
                 # Interval 1m, Limit = lookback
                 params = {
                     "symbol": symbol.upper(),
-                    "interval": f"{CANDLE_TIMEFRAME_MINUTES}m",
+                    "interval": interval,
                     "limit": lookback_bars
                 }
                 resp = self.session.get(base_url, params=params, timeout=10)
@@ -180,19 +183,20 @@ class BinanceClient:
                 
         return history
 
-    def fetch_latest_candle(self, symbol: str) -> requests.Response:
+    def fetch_latest_candle(self, symbol: str, context: Optional["TimeframeContext"] = None) -> requests.Response:
         """
         Fetch the most recently closed candle for a specific symbol via REST API.
         This is used for reconciliation.
         """
         base_url = "https://api.binance.com/api/v3/klines"
+        interval = f"{int(context.interval_ms // 60000)}m" if context else f"{CANDLE_TIMEFRAME_MINUTES}m"
         try:
             # We want the LAST closed candle. 
             # Requesting limit=2 ensures we get the just-closed one + the currently forming one.
             # We will take the second to last item.
             params = {
                 "symbol": symbol.upper(),
-                "interval": f"{CANDLE_TIMEFRAME_MINUTES}m",
+                "interval": interval,
                 "limit": 2
             }
             resp = self.session.get(base_url, params=params, timeout=5)

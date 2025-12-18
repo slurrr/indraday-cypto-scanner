@@ -1,5 +1,5 @@
-from typing import List, Optional, Tuple
-from models.types import Candle, FlowRegime, PatternType, Alert
+from typing import List, Optional, Tuple, Dict
+from models.types import Candle, FlowRegime, PatternType, ExecutionType, Alert, StateSnapshot, TimeframeContext, State, ExecutionSignal
 from config.settings import (
     MIN_ATR_PERCENTILE,
     FLOW_SLOPE_THRESHOLD,
@@ -10,6 +10,11 @@ from config.settings import (
     SESSION_LOOKBACK_WINDOW,
     MIN_ALERT_SCORE,
     SCORING_WEIGHTS,
+    WATCH_ELIGIBLE_PATTERNS,
+    ACT_ELIGIBLE_PATTERNS,
+    ACT_DEMOTION_PATTERNS,
+    MAX_ACT_DURATION_MS,
+    MAX_WATCH_DURATION_MS,
 )
 import numpy as np
 import time
@@ -36,11 +41,22 @@ class Analyzer:
     # ------------------------------------------------------------------
     # Public entry
     # ------------------------------------------------------------------
-    def analyze(self, symbol: str, candles: List[Candle]) -> List[Alert]:
+    def analyze(
+        self, 
+        symbol: str, 
+        candles: List[Candle], 
+        context: Optional["TimeframeContext"] = None,
+        state: Optional["StateSnapshot"] = None
+    ) -> List[Alert]:
         if len(candles) < self.MIN_HISTORY:
             return []
 
         current_candle = candles[-1]
+        
+        # Update State (placeholder logic for now)
+        if state:
+            state.last_updated_at = current_candle.timestamp
+
         regime = self._determine_regime(candles, current_candle)
 
         alerts: List[Alert] = []
@@ -61,7 +77,7 @@ class Analyzer:
             if score >= MIN_ALERT_SCORE:
                 alerts.append(
                     self._create_alert(
-                        symbol, PatternType.VWAP_RECLAIM, regime, current_candle, score
+                        symbol, PatternType.VWAP_RECLAIM, regime, current_candle, score, context
                     )
                 )
 
@@ -81,7 +97,7 @@ class Analyzer:
             if score >= MIN_ALERT_SCORE:
                 alerts.append(
                     self._create_alert(
-                        symbol, PatternType.IGNITION, regime, current_candle, score
+                        symbol, PatternType.IGNITION, regime, current_candle, score, context
                     )
                 )
 
@@ -101,7 +117,7 @@ class Analyzer:
             if score >= MIN_ALERT_SCORE:
                 alerts.append(
                     self._create_alert(
-                        symbol, PatternType.PULLBACK, regime, current_candle, score
+                        symbol, PatternType.PULLBACK, regime, current_candle, score, context
                     )
                 )
 
@@ -122,7 +138,7 @@ class Analyzer:
             if score >= MIN_ALERT_SCORE:
                 alerts.append(
                     self._create_alert(
-                        symbol, PatternType.TRAP, regime, current_candle, score
+                        symbol, PatternType.TRAP, regime, current_candle, score, context
                     )
                 )
 
@@ -142,11 +158,198 @@ class Analyzer:
             if score >= MIN_ALERT_SCORE:
                 alerts.append(
                     self._create_alert(
-                        symbol, PatternType.FAILED_BREAKOUT, regime, current_candle, score
+                        symbol, PatternType.FAILED_BREAKOUT, regime, current_candle, score, context
                     )
                 )
 
+
+        # --- State Promotion Logic ---
+        if state and state.state == State.IGNORE:
+            # Gather all qualifying patterns from generated alerts
+            # We use strict matching against WATCH_ELIGIBLE_PATTERNS
+            qualifying_patterns = [
+                a.pattern.value for a in alerts 
+                if a.pattern.value in WATCH_ELIGIBLE_PATTERNS
+            ]
+            
+            if qualifying_patterns:
+                state.state = State.WATCH
+                state.entered_at = current_candle.timestamp
+                # last_updated_at was already updated at top of method
+                state.watch_reason = qualifying_patterns[0]
+                state.active_patterns.extend(qualifying_patterns)
+
+        # --- State Promotion Logic: WATCH -> ACT ---
+        elif state and state.state == State.WATCH:
+            # Check permission first
+            if state.permission and state.permission.allowed:
+                 # Gather qualifying patterns
+                 qualifying_patterns = [
+                    a.pattern.value for a in alerts 
+                    if a.pattern.value in ACT_ELIGIBLE_PATTERNS
+                 ]
+                 if qualifying_patterns:
+                     state.state = State.ACT
+                     state.entered_at = current_candle.timestamp
+                     state.act_reason = qualifying_patterns[0]
+                     state.active_patterns.extend(qualifying_patterns)
+
+        # --- Demotion Logic: ACT -> WATCH ---
+        if state and state.state == State.ACT:
+            duration = current_candle.timestamp - state.entered_at
+            
+            # 1. Timeout
+            timeout = duration > MAX_ACT_DURATION_MS
+            # 2. Permission Revoked
+            perm_revoked = state.permission and not state.permission.allowed
+            # 3. Disqualifying Pattern
+            disqualified = any(
+                a.pattern.value in ACT_DEMOTION_PATTERNS 
+                for a in alerts
+            )
+            
+            if timeout or perm_revoked or disqualified:
+                old_reason = state.act_reason
+                state.state = State.WATCH
+                state.entered_at = current_candle.timestamp
+                state.act_reason = None
+                
+                reason_msg = "ACT Timeout" if timeout else ("Permission Revoked" if perm_revoked else "Disqualifying Pattern")
+                state.reasons.append(f"Demoted ACT->WATCH: {reason_msg} (was {old_reason})")
+
+        # --- Demotion Logic: WATCH -> IGNORE ---
+        if state and state.state == State.WATCH:
+             duration = current_candle.timestamp - state.entered_at
+             if duration > MAX_WATCH_DURATION_MS:
+                 old_reason = state.watch_reason
+                 state.state = State.IGNORE
+                 state.watch_reason = None
+                 state.reasons.append(f"Demoted WATCH->IGNORE: Timeout (was {old_reason})")
+        
+        # --- Alert Gating ---
+        # Suppress alerts unless state is ACT
+        if state and state.state != State.ACT:
+            return []
+
         return alerts
+
+    def analyze_permission(self, symbol: str, candles: List[Candle], context: Optional["TimeframeContext"] = None) -> "PermissionSnapshot":
+        from models.types import PermissionSnapshot
+        if not candles:
+             return PermissionSnapshot(symbol, 0, "NEUTRAL", "NORMAL", False, ["No candles"])
+        
+        current = candles[-1]
+        
+        # 1. Bias Check (Simple Price vs VWAP)
+        # In 15m, if price > VWAP -> Bullish, else Bearish (simplified)
+        bias = "NEUTRAL"
+        if current.vwap:
+             if current.close > current.vwap:
+                 bias = "BULLISH"
+             elif current.close < current.vwap:
+                 bias = "BEARISH"
+        
+        # 2. Volatility Check
+        vol_regime = "NORMAL"
+        if current.atr_percentile:
+             if current.atr_percentile < 20:
+                 vol_regime = "LOW"
+             elif current.atr_percentile > 80:
+                 vol_regime = "HIGH"
+        
+        # 3. Allowed?
+        # For now, allow everything unless data is missing
+        allowed = True
+        reasons = []
+        
+        if not current.vwap:
+             allowed = False
+             reasons.append("Missing VWAP")
+        
+        return PermissionSnapshot(
+             symbol=symbol,
+             computed_at=current.timestamp,
+             bias=bias,
+             volatility_regime=vol_regime,
+             allowed=allowed,
+             reasons=reasons
+        )
+
+
+    # ------------------------------------------------------------------
+    # 1m Execution Logic
+    # ------------------------------------------------------------------
+    def analyze_execution(
+        self, 
+        symbol: str, 
+        candles_1m: List[Candle], 
+        state: Optional["StateSnapshot"]
+    ) -> List[ExecutionSignal]:
+        
+        # 1. Gate: Must be in ACT state
+        if not state or state.state != State.ACT:
+             return []
+        
+        # 2. Gate: Must have explicit upstream direction
+        if not state.act_direction or state.act_direction not in ("LONG", "SHORT"):
+             return []
+             
+        if len(candles_1m) < 5:
+             return []
+             
+        curr = candles_1m[-1]
+        
+        # 3. Timing Logic (Confirmation Only)
+        spot_slope, perp_slope = self._get_flow_slopes(curr)
+        
+        signal_valid = False
+        reason = ""
+        strength = 0.0
+        
+        if state.act_direction == "LONG":
+            # REJECT if flow is actively bearish
+            # tune this in the future - use or instead of and, increase the thresholds...
+            if spot_slope < -0.5 and perp_slope < -0.5:
+                return []
+            
+            # CONFIRM if bullish structure + price ok
+            if curr.vwap and curr.close > curr.vwap:
+                body = curr.close - curr.open
+                if body > 0 and self._is_directional_candle(curr):
+                    signal_valid = True
+                    reason = "1m Timing: Price > VWAP + Green Candle"
+                    strength = min(body / (curr.atr if curr.atr else 1.0), 10.0)
+
+        elif state.act_direction == "SHORT":
+            # REJECT if flow is actively bullish
+            # tune this in the future - use or instead of and, increase the thresholds...
+            if spot_slope > 0.5 and perp_slope > 0.5:
+                return []
+                
+            # CONFIRM if bearish structure + price ok
+            if curr.vwap and curr.close < curr.vwap:
+                body = curr.open - curr.close
+                if body > 0 and self._is_directional_candle(curr):
+                    signal_valid = True
+                    reason = "1m Timing: Price < VWAP + Red Candle"
+                    strength = min(body / (curr.atr if curr.atr else 1.0), 10.0)
+
+        if signal_valid:
+             return [
+                 ExecutionSignal(
+                     symbol=symbol,
+                     timestamp=curr.timestamp,
+                     price=curr.close,
+                     direction=state.act_direction, # Strictly inferred from state
+                     reason=reason,
+                     strength=strength
+                 )
+             ]
+             
+        return []
+
+
+
 
     # ------------------------------------------------------------------
     # Flow Regime
@@ -624,11 +827,13 @@ class Analyzer:
     def _create_alert(
         self,
         symbol: str,
-        pattern: PatternType,
+        pattern: PatternType | ExecutionType,
         regime: FlowRegime,
         candle: Candle,
         score: float,
+        context: Optional["TimeframeContext"] = None
     ) -> Alert:
+        tf_name = context.name if context else "3m"
         return Alert(
             timestamp=int(time.time() * 1000),
             candle_timestamp=candle.timestamp,
@@ -638,6 +843,7 @@ class Analyzer:
             flow_regime=regime,
             price=candle.close,
             message=f"{pattern.value} detected in {regime.value}",
+            timeframe=tf_name
         )
 
     # ------------------------------------------------------------------

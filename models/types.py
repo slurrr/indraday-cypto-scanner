@@ -1,8 +1,7 @@
 from enum import Enum
 from dataclasses import dataclass, field
-from typing import List, Optional
 from datetime import datetime
-from typing import Protocol, Any
+from typing import Protocol, Any, Optional, List
 
 class StatusSink(Protocol):
     def feed_connected(self):
@@ -31,6 +30,9 @@ class PatternType(str, Enum):
     TRAP = "TRAP"
     IGNITION = "IGNITION"
     FAILED_BREAKOUT = "FAILED_BREAKOUT"
+
+class ExecutionType(str, Enum):
+    EXEC = "EXEC"
 
 @dataclass
 class Trade:
@@ -63,15 +65,65 @@ class Candle:
     perp_cvd_slope: Optional[float] = None
     
 @dataclass
+class TimeframeContext:
+    name: str
+    interval_ms: int
+
+class State(Enum):
+    IGNORE = "IGNORE"
+    WATCH = "WATCH"
+    ACT = "ACT"
+
+@dataclass
+class StateSnapshot:
+    symbol: str
+    state: State = State.IGNORE
+    entered_at: int = 0
+    last_updated_at: int = 0
+    watch_reason: Optional[str] = None
+    act_reason: Optional[str] = None
+    act_direction: Optional[str] = None
+    reasons: List[str] = field(default_factory=list)
+    active_patterns: List[str] = field(default_factory=list)
+    permission: Optional["PermissionSnapshot"] = None
+
+@dataclass
+class PermissionSnapshot:
+    symbol: str
+    computed_at: int
+    bias: str  # e.g., "BULLISH", "BEARISH", "NEUTRAL"
+    volatility_regime: str  # e.g., "LOW", "NORMAL", "HIGH"
+    allowed: bool
+    reasons: List[str] = field(default_factory=list)
+    timeframe: str = "15m"
+
+@dataclass
 class Alert:
     timestamp: int
     candle_timestamp: int
     symbol: str
-    pattern: PatternType
+    pattern: PatternType | ExecutionType
     score: float
     flow_regime: FlowRegime
     price: float
     message: str
+    timeframe: str = "3m"  # Default for backward compatibility during refactor
+
+    @property
+    def is_execution(self) -> bool:
+        return isinstance(self.pattern, ExecutionType)
     
     def __str__(self):
-        return f"{self.symbol} | {self.pattern.value} | {self.flow_regime.value} | Score: {self.score:.1f}"
+        return f"[{self.timeframe}] {self.symbol} | {self.pattern.value} | {self.flow_regime.value} | Score: {self.score:.1f}"
+
+@dataclass
+class ExecutionSignal:
+    symbol: str
+    timestamp: int
+    price: float
+    direction: str  # "LONG" or "SHORT"
+    reason: str
+    strength: float = 0.0
+    
+    def __str__(self):
+        return f"[EXEC] {self.symbol} {self.direction} @ {self.price} | {self.reason} ({self.strength:.1f})"
