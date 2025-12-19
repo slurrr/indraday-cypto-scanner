@@ -50,7 +50,6 @@ ACT_ELIGIBLE_PATTERNS = [
     "PULLBACK",
     "TRAP", 
     "FAILED_BREAKOUT"
-    "FAILED_BREAKOUT"
 ]
 
 ACT_DEMOTION_PATTERNS = []
@@ -81,3 +80,6 @@ FLOW_SLOPE_THRESHOLD = BASE_FLOW_SLOPE_THRESHOLD_1M * CANDLE_TIMEFRAME_MINUTES #
 
 # Debug mode for analyzer
 ANALYZER_DEBUG = True   # Set False for production
+
+# UI Configuration
+ENABLE_STATE_MONITOR = True # Toggle to show/hide the State Monitor panel

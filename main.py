@@ -84,7 +84,7 @@ def main():
     # State Management (Step 6)
     # Initialize state for each symbol
     symbol_states: Dict[str, StateSnapshot] = {
-        s: StateSnapshot(symbol=s, state=State.WATCH) for s in SYMBOLS
+        s: StateSnapshot(symbol=s, state=State.WATCH, entered_at=int(time.time() * 1000)) for s in SYMBOLS
     }
 
     # Deduplication Set: Stores (symbol, pattern_name, candle_timestamp)
@@ -102,6 +102,7 @@ def main():
                 if key not in sent_alerts:
                     sent_alerts.add(key)
                     new_unique_alerts.append(alert)
+        
         
         for alert in new_unique_alerts:
             ui.add_alert(alert)
@@ -214,7 +215,7 @@ def main():
                     timestamp=int(time.time() * 1000),
                     candle_timestamp=sig.timestamp,
                     symbol=sig.symbol,
-                    pattern=PatternType.EXEC,
+                    pattern= ExecutionType.EXEC,
                     score=min(sig.strength * 10.0, 100.0), # normalize strength?
                     flow_regime=analyzer._determine_regime(history, history[-1]), # roughly
                     price=sig.price,
@@ -260,6 +261,15 @@ def main():
                     daemon=True
                 ).start()
 
+            # --- 1m Processing ---
+            closed_candle_1m = data_processor_1m.process_trade(trade)
+            if closed_candle_1m:
+                threading.Thread(
+                    target=reconcile_candle,
+                    args=(closed_candle_1m.symbol, closed_candle_1m.timestamp, data_processor_1m, tf_context_1m, analyze_1m),
+                    daemon=True
+                ).start()
+
     # Setup Binance Client
     client = BinanceClient(SYMBOLS, on_trade_callback=on_trade, status_sink=ui)
     ui.status.binance_client = client
@@ -299,15 +309,6 @@ def main():
                 update_indicators(hist, context=tf_context_1m)
                 # No need to analyze execution on history start, just have data ready
 
-        # --- 1m Initialization ---
-        history_map_1m = client.fetch_historical_candles(lookback_bars=60, context=tf_context_1m)
-        data_processor_1m.init_history(history_map_1m)
-        for symbol, hist in history_map_1m.items():
-            if hist:
-                update_indicators(hist, context=tf_context_1m)
-                # No need to analyze execution on history start, just have data ready
-
-
         # Force UI to render prefetched alerts
         if ui.alerts:
             ui.dirty = True
@@ -335,6 +336,9 @@ def main():
             screen=False
         ) as live:
             while True:
+                # Update UI with latest state (thread-safe copy inside method)
+                ui.update_state_monitor(symbol_states)
+                
                 if ui.dirty:          # set only when alerts change
                     ui.dirty = False
                     live.update(ui.generate_layout(), refresh=True)

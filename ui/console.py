@@ -1,9 +1,10 @@
 from rich.table import Table
 from rich.layout import Layout
 import threading
-from typing import List
+from config.settings import ENABLE_STATE_MONITOR
+from typing import List, Dict
 import pandas as pd
-from models.types import Alert, FlowRegime
+from models.types import Alert, FlowRegime, State, StateSnapshot
 from dataclasses import dataclass
 from time import time
 from rich.panel import Panel
@@ -30,6 +31,38 @@ class ConsoleUI():
         self.dirty = False 
         self.status = UIStatus()
         self.lock = threading.Lock()
+        
+        # State Monitor Data
+        self.symbol_states: Dict[str, StateSnapshot] = {}
+        
+        # Throttling
+        self.last_monitor_refresh = 0.0
+        self.shadow_states: Dict[str, str] = {} # Key: Symbol, Value: Signature (State+Patterns)
+
+        # Initialize Layout ONCE
+        self.layout = self._init_layout()
+
+    def _init_layout(self) -> Layout:
+        layout = Layout()
+        
+        if ENABLE_STATE_MONITOR:
+            # Split screen: Top (Alerts) 60%, Bottom (State + Status) 40%
+            layout.split_column(
+                Layout(name="table", ratio=6),
+                Layout(name="lower_panel", ratio=4)
+            )
+            # Split lower panel: State Monitor (Top), Status Bar (Bottom fixed)
+            layout["lower_panel"].split_column(
+                Layout(name="state_monitor"),
+                Layout(name="status", size=3)
+            )
+        else:
+            # Original Layout
+            layout.split_column(
+                Layout(name="table", ratio=4),
+                Layout(name="status", size=3),
+            )
+        return layout
 
     def feed_connected(self):
         self.status.feed_connected = True
@@ -54,6 +87,37 @@ class ConsoleUI():
         self.dirty = True
 
         logger.info(f"UI RECEIVED ALERT: {alert.symbol} {alert.pattern}")
+
+    def update_state_monitor(self, states: Dict[str, StateSnapshot]):
+        """
+        Updates the local copy of symbol states for rendering.
+        Throttles repaints to 1Hz unless a critical state change occurs.
+        """
+        if not ENABLE_STATE_MONITOR:
+            return
+
+        now = time()
+        force_update = False
+        
+        # Check for critical changes (State or Pattern transitions)
+        for sym, snap in states.items():
+            # Create a signature for the visual state (excluding timer)
+            sig = f"{snap.state.name}|{','.join(snap.active_patterns)}|{snap.permission}"
+            
+            if sym not in self.shadow_states or self.shadow_states[sym] != sig:
+                self.shadow_states[sym] = sig
+                force_update = True
+        
+        # Check for timer update (1Hz)
+        if now - self.last_monitor_refresh > 1.0:
+            force_update = True
+            
+        with self.lock:
+            self.symbol_states = states.copy()
+            
+        if force_update:
+             self.dirty = True
+             self.last_monitor_refresh = now
 
     def generate_status_panel(self) -> Panel:
         items = []
@@ -98,15 +162,81 @@ class ConsoleUI():
 
         content = "  |  ".join(items)
         return Panel(Text.from_markup(content), title="Status", border_style="blue")
+    
+    def generate_state_table(self) -> Table:
+        """
+        Generates a table showing the live state of each symbol.
+        """
+        table = Table(title="State Monitor")
+        table.add_column("Symbol", style="cyan")
+        table.add_column("State", justify="center")
+        table.add_column("Bias / Perm", justify="center")
+        table.add_column("Active Patterns / Reason", style="dim")
+        table.add_column("Time in State", justify="right")
+        
+        now = time() * 1000 # ms
+        
+        # Sort by State prominence (ACT > WATCH > IGNORE) then Symbol
+        def sort_key(item):
+            sym, snap = item
+            score = 0
+            if snap.state == State.ACT: score = 3
+            elif snap.state == State.WATCH: score = 2
+            elif snap.state == State.IGNORE: score = 1
+            return (-score, sym)
+            
+        with self.lock:
+            sorted_states = sorted(self.symbol_states.items(), key=sort_key)
+            
+        for symbol, snap in sorted_states:
+            # State Color
+            state_style = "dim white"
+            if snap.state == State.ACT:
+                 state_style = "bold green"
+            elif snap.state == State.WATCH:
+                 state_style = "bold yellow"
+            
+            # Permission String
+            perm_str = "-"
+            if snap.permission:
+                allow_color = "green" if snap.permission.allowed else "red"
+                perm_str = f"[{allow_color}]{snap.permission.bias} ({snap.permission.volatility_regime})[/]"
+            
+            # Reason
+            reason = snap.act_reason if snap.state == State.ACT else (snap.watch_reason if snap.state == State.WATCH else "-")
+            if snap.active_patterns:
+                pat_str = ", ".join(snap.active_patterns)
+                reason = f"{reason} [{pat_str}]"
+            
+            # Duration
+            duration_s = (now - snap.entered_at) / 1000 if snap.entered_at > 0 else 0
+            dur_str = f"{duration_s:.0f}s"
+            
+            table.add_row(
+                symbol,
+                f"[{state_style}]{snap.state.name}[/]",
+                perm_str,
+                str(reason),
+                dur_str
+            )
+            
+        return table
 
     def generate_layout(self) -> Layout:
-        layout = Layout()
-        layout.split_column(
-            Layout(self.generate_table(), name="table", ratio=4),
-            Layout(self.generate_status_panel(), name="status", size=3),
-        )
-        self.layout = layout
-        return layout
+        """
+        Updates the content of the existing layout tree.
+        """
+        # Update Table (Always)
+        self.layout["table"].update(self.generate_table())
+        
+        # Update Status and Monitor
+        if ENABLE_STATE_MONITOR:
+             self.layout["lower_panel"]["state_monitor"].update(self.generate_state_table())
+             self.layout["lower_panel"]["status"].update(self.generate_status_panel())
+        else:
+             self.layout["status"].update(self.generate_status_panel())
+
+        return self.layout
 
     def generate_table(self) -> Table:
         table = Table(title="Intraday Flow Scanner")
@@ -120,7 +250,7 @@ class ConsoleUI():
         with self.lock:
             # Copy alerts safely to minimize lock time during rendering layout
             current_alerts = self.alerts[:]
-
+            
         for alert in current_alerts:
             # Color code regime
             regime_style = "white"
@@ -151,11 +281,9 @@ class ConsoleUI():
             )
         return table
 
+    # Deprecated update helpers (logic moved to generate_layout)
     def update_table(self):
-        assert hasattr(self, "layout")
-        self.layout["table"].update(self.generate_table())
+        pass
 
     def update_status(self):
-        assert hasattr(self, "layout")
-        self.layout["status"].update(self.generate_status_panel())
-
+        pass

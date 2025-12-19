@@ -1,6 +1,7 @@
 import json
 import threading
 import time
+import random
 import websocket
 from typing import Callable, List, Dict, Optional
 from config.settings import BINANCE_SPOT_WS_URL, BINANCE_PERP_WS_URL, CANDLE_TIMEFRAME_MINUTES
@@ -25,7 +26,8 @@ class BinanceClient:
         # Initialize persistent session for API calls to prevent socket exhaustion
         self.session = requests.Session()
         retries = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504])
-        adapter = HTTPAdapter(max_retries=retries)
+        # Increase pool size to handle burst of requests (reconciliation)
+        adapter = HTTPAdapter(max_retries=retries, pool_connections=50, pool_maxsize=50)
         self.session.mount('https://', adapter)
         self.session.mount('http://', adapter)
         logger.info(f"BinanceClient instance created: {id(self)}")
@@ -245,8 +247,33 @@ class BinanceClient:
             on_error=self._on_error,
             on_close=self._on_close
         )
-        threading.Thread(target=self.ws_spot.run_forever, kwargs={'ping_interval': 20, 'ping_timeout': 10}, daemon=True).start()
-        threading.Thread(target=self.ws_perp.run_forever, kwargs={'ping_interval': 20, 'ping_timeout': 10}, daemon=True).start()
+        
+        # Wrapper to ensure reconnection
+        def _run_socket_forever(ws_app, name):
+            retry_count = 0
+            while self.keep_running:
+                try:
+                    logger.info(f"Starting {name} Websocket run_forever loop...")
+                    # run_forever blocks until disconnection
+                    ws_app.run_forever(ping_interval=20, ping_timeout=10)
+                    
+                    if not self.keep_running:
+                        break
+                        
+                    logger.warning(f"{name} Websocket disconnected. Reconnecting...")
+                    
+                    # Exponential backoff with jitter
+                    retry_count += 1
+                    sleep_time = min(60, (2 ** retry_count)) + random.uniform(0, 1)
+                    logger.info(f"Sleeping {sleep_time:.2f}s before {name} reconnect...")
+                    time.sleep(sleep_time)
+                    
+                except Exception as e:
+                    logger.error(f"Critical error in {name} run loop: {e}")
+                    time.sleep(5)
+
+        threading.Thread(target=_run_socket_forever, args=(self.ws_spot, "Spot"), daemon=True).start()
+        threading.Thread(target=_run_socket_forever, args=(self.ws_perp, "Perp"), daemon=True).start()
 
     def stop(self):
         self.keep_running = False
