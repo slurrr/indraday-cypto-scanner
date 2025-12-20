@@ -23,19 +23,44 @@ def test_ui_render():
     
     alert = Alert(
         timestamp=fixed_ts,
+        candle_timestamp=fixed_ts,
         symbol="BTCUSDT",
         pattern=PatternType.VWAP_RECLAIM,
         score=85.5,
         flow_regime=FlowRegime.BULLISH_CONSENSUS,
         price=50123.45,
-        message="Test Alert"
+        message="Test Alert",
+        direction="LONG"
     )
     
     ui.add_alert(alert)
     
+    # Mock State for State Monitor
+    from models.types import StateSnapshot, State, PermissionSnapshot
+    
+    # Set entered_at to 3661 seconds ago (1h 1m 1s)
+    entered_at_ms = (time.time() - 3661) * 1000
+    
+    ui.symbol_states = {
+        "BTCUSDT": StateSnapshot(
+            symbol="BTCUSDT",
+            state=State.ACT,
+            entered_at=entered_at_ms,
+            act_direction="LONG",
+            act_reason="Test Reason",
+            permission=PermissionSnapshot(
+                symbol="BTCUSDT",
+                computed_at=fixed_ts,
+                bias="BULLISH",
+                volatility_regime="NORMAL",
+                allowed=True
+            )
+        )
+    }
+
     try:
+        # Verify Alerts Table
         table = ui.generate_table()
-        
         capture_console.print(table)
         output = capture_console.file.getvalue()
         
@@ -44,6 +69,7 @@ def test_ui_render():
         assert "BTCUSDT" in output, "Symbol not found"
         assert "VWAP_RECLAIM" in output, "Pattern not found"
         assert "FLOW_BULLISH" in output, "Regime not found"
+        assert "LONG" in output, "Direction not found in Alerts table"
         
         # Verify Price formatting (4 decimal places per ui/console.py)
         assert "50123.4500" in output, "Price formatting incorrect"
@@ -54,8 +80,27 @@ def test_ui_render():
         # Verify Timezone conversion (UTC 12:00 -> Denver 05:00)
         # 12:00 UTC is 05:00 MST
         assert "05:00:00" in output, f"Time conversion incorrect. Output contained: {output}"
+
+        # Cleare buffer for next test
+        capture_console.file.seek(0)
+        capture_console.file.truncate(0)
+
+        # Verify State Monitor Table
+        state_table = ui.generate_state_table()
+        capture_console.print(state_table)
+        state_output = capture_console.file.getvalue()
+
+        assert "State Monitor" in state_output, "State Monitor Title not found"
+        assert "Act Dir" in state_output, "Act Dir column missing"
+        assert "LONG" in state_output, "Act Direction Value not found in State Monitor"
         
-        print("SUCCESS: Table rendered successfully and assertions passed.")
+        # Verify HH:MM:SS format (1h 1m 1s = 01:01:01)
+        # Note: execution time might add a split second, so we check approximate or flexible
+        # Actually since we set it relative to time.time() and generate_state_table calls time.time()
+        # immediately after, it should be very close. We'll search for "01:01:01" or "01:01:02"
+        assert "01:01:01" in state_output or "01:01:02" in state_output, f"Duration format incorrect. Output: {state_output}"
+        
+        print("SUCCESS: Tables rendered successfully and assertions passed.")
         
     except Exception as e:
         print(f"FAILURE: {e}")

@@ -107,6 +107,7 @@ class Alert:
     flow_regime: FlowRegime
     price: float
     message: str
+    direction: Optional[str] = None
     timeframe: str = "3m"  # Default for backward compatibility during refactor
 
     @property

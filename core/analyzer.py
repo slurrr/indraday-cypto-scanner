@@ -194,6 +194,38 @@ class Analyzer:
                      state.act_reason = qualifying_patterns[0]
                      state.active_patterns.extend(qualifying_patterns)
 
+                     # Fix: Infer act_direction locally based on the triggering pattern
+                     direction = None
+                     trigger = PatternType(state.act_reason)
+                     
+                     if trigger in (PatternType.IGNITION, PatternType.TRAP):
+                         # Green -> LONG, Red -> SHORT
+                         direction = "LONG" if current_candle.close > current_candle.open else "SHORT"
+                     elif trigger == PatternType.VWAP_RECLAIM:
+                         # Above VWAP -> LONG, Below -> SHORT
+                         vwap = current_candle.vwap or 0.0
+                         direction = "LONG" if current_candle.close > vwap else "SHORT"
+                     elif trigger == PatternType.PULLBACK:
+                         # Use flow check to confirm direction
+                         if self._bullish_flow_ok(candles, current_candle, regime):
+                             direction = "LONG"
+                         else:
+                             direction = "SHORT"
+                     elif trigger == PatternType.FAILED_BREAKOUT:
+                         # If rejecting high -> SHORT, rejecting low -> LONG
+                         # Heuristic: check if current high > recent high
+                         hist = candles[-SESSION_LOOKBACK_WINDOW:-1]
+                         if hist:
+                             prev_high = max((c.high for c in hist if c.high is not None), default=0.0)
+                             if current_candle.high is not None and current_candle.high > prev_high:
+                                 direction = "SHORT"
+                             else:
+                                 direction = "LONG"
+                         else:
+                             direction = "LONG" # Fallback
+
+                     state.act_direction = direction
+
         # --- Demotion Logic: ACT -> WATCH ---
         if state and state.state == State.ACT:
             duration = current_candle.timestamp - state.entered_at
@@ -226,10 +258,15 @@ class Analyzer:
                  state.watch_reason = None
                  state.reasons.append(f"Demoted WATCH->IGNORE: Timeout (was {old_reason})")
         
-        # --- Alert Gating ---
+        # --- Alert Gating & Direction Injection ---
         # Suppress alerts unless state is ACT
         if state and state.state != State.ACT:
             return []
+        
+        # Inject the confirmed direction into the alerts so UI can render it
+        if state and state.act_direction:
+            for a in alerts:
+                a.direction = state.act_direction
 
         return alerts
 
@@ -831,7 +868,8 @@ class Analyzer:
         regime: FlowRegime,
         candle: Candle,
         score: float,
-        context: Optional["TimeframeContext"] = None
+        context: Optional["TimeframeContext"] = None,
+        direction: Optional[str] = None
     ) -> Alert:
         tf_name = context.name if context else "3m"
         return Alert(
@@ -843,7 +881,8 @@ class Analyzer:
             flow_regime=regime,
             price=candle.close,
             message=f"{pattern.value} detected in {regime.value}",
-            timeframe=tf_name
+            timeframe=tf_name,
+            direction=direction
         )
 
     # ------------------------------------------------------------------

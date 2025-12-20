@@ -19,6 +19,9 @@ class DataProcessor:
         # symbol -> history of candles (list)
         self.history: Dict[str, List[Candle]] = {}
         
+        # Throttling for UI updates
+        self.last_tick_update_time = 0.0
+        
     def process_trade(self, trade: Trade) -> Optional[Candle]:
         """
         Ingest a trade, update the current candle. 
@@ -52,6 +55,13 @@ class DataProcessor:
             self.active_candles[symbol] = self._create_new_candle(trade, minute_start_ms, trade.price)
         if closed_candle:
             self.status_sink.tick()
+            self.last_tick_update_time = time()
+        else:
+            # Throttle UI updates to 1s to prevent flicker but ensure "Last Tick" isn't stale
+            now = time()
+            if now - self.last_tick_update_time >= 1.0:
+                self.status_sink.tick()
+                self.last_tick_update_time = now
 
         return closed_candle
 

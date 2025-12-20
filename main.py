@@ -4,6 +4,7 @@ import sys, os
 from typing import List
 from rich.console import Console
 from rich.live import Live
+from collections import OrderedDict
 
 # Keep a real stdout for Rich to use
 REAL_STDOUT = sys.__stdout__
@@ -19,10 +20,11 @@ import queue
 import threading
 from config.settings import SYMBOLS
 from data.binance_client import BinanceClient
+from concurrent.futures import ThreadPoolExecutor
 from core.data_processor import DataProcessor
 from core.analyzer import Analyzer
 from core.indicators import update_indicators
-from models.types import Trade, Alert, TimeframeContext, State, StateSnapshot
+from models.types import Trade, Alert, TimeframeContext, State, StateSnapshot, ExecutionType
 from utils.logger import setup_logger
 
 INSTANCE_ID = os.environ.get("SCANNER_INSTANCE", os.getpid())
@@ -80,6 +82,10 @@ def main():
     # Per-symbol locks to prevent race conditions between Spot and Perp threads
     # without blocking unrelated symbols
     symbol_locks = {s: threading.Lock() for s in SYMBOLS}
+    
+    # Thread Pool for Reconciliation Tasks
+    # Limits concurrent network/processing tasks to prevent Segfaults/resource exhaustion
+    reconciliation_executor = ThreadPoolExecutor(max_workers=40, thread_name_prefix="ReconcileWorker")
 
     # State Management (Step 6)
     # Initialize state for each symbol
@@ -88,7 +94,8 @@ def main():
     }
 
     # Deduplication Set: Stores (symbol, pattern_name, candle_timestamp)
-    sent_alerts = set()
+    # Changed to OrderedDict to allow FIFO eviction
+    sent_alerts = OrderedDict()
     sent_alerts_lock = threading.Lock()
 
     def handle_alerts(alerts: List[Alert]):
@@ -100,8 +107,12 @@ def main():
                 key = (alert.symbol, alert.pattern.value, alert.candle_timestamp)
                 
                 if key not in sent_alerts:
-                    sent_alerts.add(key)
+                    sent_alerts[key] = True # Mark as seen
                     new_unique_alerts.append(alert)
+                    
+                    # Enforce Size Cap (FIFO)
+                    if len(sent_alerts) > 10000:
+                        sent_alerts.popitem(last=False)
         
         
         for alert in new_unique_alerts:
@@ -215,12 +226,13 @@ def main():
                     timestamp=int(time.time() * 1000),
                     candle_timestamp=sig.timestamp,
                     symbol=sig.symbol,
-                    pattern= ExecutionType.EXEC,
+                    pattern=ExecutionType.EXEC,
                     score=min(sig.strength * 10.0, 100.0), # normalize strength?
                     flow_regime=analyzer._determine_regime(history, history[-1]), # roughly
                     price=sig.price,
                     message=f"{sig.direction}: {sig.reason}",
-                    timeframe="1m"
+                    timeframe="1m",
+                    direction=sig.direction
                 )
                 handle_alerts([alert])
 
@@ -245,30 +257,27 @@ def main():
                         analysis_queue.put(symbol)
 
                 # --- SLOW PATH: Background Reconciliation (3m) ---
-                threading.Thread(
-                    target=reconcile_candle, 
-                    args=(symbol, closed_candle.timestamp, data_processor, tf_context, analyze_3m), 
-                    daemon=True
-                ).start()
+                reconciliation_executor.submit(
+                    reconcile_candle, 
+                    symbol, closed_candle.timestamp, data_processor, tf_context, analyze_3m
+                )
 
             # --- 15m Processing ---
             closed_candle_15m = data_processor_15m.process_trade(trade)
             if closed_candle_15m:
                 # No fast path for 15m yet, just reconciliation/permission check
-                threading.Thread(
-                    target=reconcile_candle,
-                    args=(closed_candle_15m.symbol, closed_candle_15m.timestamp, data_processor_15m, tf_context_15m, analyze_15m),
-                    daemon=True
-                ).start()
+                reconciliation_executor.submit(
+                    reconcile_candle,
+                    closed_candle_15m.symbol, closed_candle_15m.timestamp, data_processor_15m, tf_context_15m, analyze_15m
+                )
 
             # --- 1m Processing ---
             closed_candle_1m = data_processor_1m.process_trade(trade)
             if closed_candle_1m:
-                threading.Thread(
-                    target=reconcile_candle,
-                    args=(closed_candle_1m.symbol, closed_candle_1m.timestamp, data_processor_1m, tf_context_1m, analyze_1m),
-                    daemon=True
-                ).start()
+                reconciliation_executor.submit(
+                    reconcile_candle,
+                    closed_candle_1m.symbol, closed_candle_1m.timestamp, data_processor_1m, tf_context_1m, analyze_1m
+                )
 
     # Setup Binance Client
     client = BinanceClient(SYMBOLS, on_trade_callback=on_trade, status_sink=ui)
@@ -298,7 +307,8 @@ def main():
             if hist:
                 update_indicators(hist, context=tf_context_15m)
                 perm = analyzer.analyze_permission(symbol, hist, context=tf_context_15m)
-                perm = analyzer.analyze_permission(symbol, hist, context=tf_context_15m)
+                if symbol in symbol_states:
+                    symbol_states[symbol].permission = perm
                 logger.info(f"[15m Init] {symbol} Permission: {perm.bias}/{perm.volatility_regime} allowed={perm.allowed}")
 
         # --- 1m Initialization ---
@@ -323,6 +333,7 @@ def main():
     def signal_handler(sig, frame):
         logger.info("Shutting down...")
         client.stop()
+        reconciliation_executor.shutdown(wait=False)
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)

@@ -171,6 +171,7 @@ class ConsoleUI():
         table.add_column("Symbol", style="cyan")
         table.add_column("State", justify="center")
         table.add_column("Bias / Perm", justify="center")
+        table.add_column("Act Dir", justify="center")
         table.add_column("Active Patterns / Reason", style="dim")
         table.add_column("Time in State", justify="right")
         
@@ -209,13 +210,16 @@ class ConsoleUI():
                 reason = f"{reason} [{pat_str}]"
             
             # Duration
-            duration_s = (now - snap.entered_at) / 1000 if snap.entered_at > 0 else 0
-            dur_str = f"{duration_s:.0f}s"
+            duration_s = int((now - snap.entered_at) / 1000) if snap.entered_at > 0 else 0
+            m, s = divmod(duration_s, 60)
+            h, m = divmod(m, 60)
+            dur_str = f"{h:02d}:{m:02d}:{s:02d}"
             
             table.add_row(
                 symbol,
                 f"[{state_style}]{snap.state.name}[/]",
                 perm_str,
+                snap.act_direction or "-",
                 str(reason),
                 dur_str
             )
@@ -243,6 +247,7 @@ class ConsoleUI():
         table.add_column("Time", style="cyan", no_wrap=True)
         table.add_column("Symbol", style="magenta")
         table.add_column("Pattern", style="green")
+        table.add_column("Direction", style="cyan")
         table.add_column("Price", justify="right")
         table.add_column("Regime", justify="center")
         table.add_column("Score", justify="right")
@@ -275,6 +280,7 @@ class ConsoleUI():
                 time_str,
                 tv_link,
                 alert.pattern.value,
+                alert.direction or "-",
                 f"{alert.price:.4f}",
                 f"[{regime_style}]{alert.flow_regime.value}[/]",
                 str(alert.score)

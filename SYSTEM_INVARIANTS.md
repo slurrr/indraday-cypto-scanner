@@ -24,5 +24,9 @@
 
 ## Resource & Performance
 - In-memory candle history must be capped (e.g., 1000 bars) to prevent unbounded memory growth.
-- **[RISK]** The `sent_alerts` deduplication set grows unbounded over the process lifetime.
 - WebSocket message drops must be tracked and exposed via metrics.
+
+## Data Consistency & Convergence
+- **Warm-Up Period (Flow)**: The scanner requires at least **15 minutes** (5x 3m bars) of uptime to establish a valid `FlowRegime` (CVD Slope). Prior to this, flow-dependent patterns (Ignition, Reclaim, Pullback) may be inaccurate or artificially suppressed/triggered due to "Zero-to-Real" slope artifacts.
+- **Warm-Up Period (Volatility)**: The scanner requires at least **42 minutes** (14x 3m bars) of uptime to establish a stable `ATR` baseline. Expansion thresholds (`Range > X * ATR`) may be more sensitive/volatile during this window.
+- **CVD Drift Invariant**: Cumulative Volume Delta (CVD) is **never** reconciled with the REST API. As a result, long-running instances will drift in their calculation of `FlowRegime` compared to fresh instances. This is an accepted behavior; Flow is treated as a relative, local signal rather than an absolute, global truth.
