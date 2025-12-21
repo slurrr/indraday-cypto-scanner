@@ -34,7 +34,7 @@ class PatternType(str, Enum):
 class ExecutionType(str, Enum):
     EXEC = "EXEC"
 
-@dataclass
+@dataclass(slots=True)
 class Trade:
     symbol: str
     price: float
@@ -43,7 +43,7 @@ class Trade:
     is_buyer_maker: bool
     source: str = "spot"  # 'spot' or 'perp'
 
-@dataclass
+@dataclass(slots=True)
 class Candle:
     symbol: str
     timestamp: int        # Open time (ms)
@@ -63,6 +63,12 @@ class Candle:
     atr_percentile: Optional[float] = None
     spot_cvd_slope: Optional[float] = None
     perp_cvd_slope: Optional[float] = None
+
+    # Cumulative State (for incremental updates)
+    cum_pv: float = 0.0
+    cum_vol: float = 0.0
+    cum_spot_cvd: float = 0.0 # Cumulative sum of spot_cvd up to this candle
+    cum_perp_cvd: float = 0.0 # Cumulative sum of perp_cvd up to this candle
     
 @dataclass
 class TimeframeContext:
@@ -97,7 +103,7 @@ class PermissionSnapshot:
     reasons: List[str] = field(default_factory=list)
     timeframe: str = "15m"
 
-@dataclass
+@dataclass(slots=True)
 class Alert:
     timestamp: int
     candle_timestamp: int

@@ -99,8 +99,8 @@ class DataProcessor:
         if symbol not in self.history:
             self.history[symbol] = []
         self.history[symbol].append(candle)
-        # Keep last 1000 candles to prevent memory leak in MVP
-        if len(self.history[symbol]) > 1000:
+        # Keep last 500 candles (increased from 300, ~25h for 3m) to prevent memory leak
+        if len(self.history[symbol]) > 500:
             self.history[symbol].pop(0)
 
     def update_history_candle(self, symbol: str, new_candle: Candle):

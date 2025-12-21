@@ -23,7 +23,7 @@ from data.binance_client import BinanceClient
 from concurrent.futures import ThreadPoolExecutor
 from core.data_processor import DataProcessor
 from core.analyzer import Analyzer
-from core.indicators import update_indicators
+from core.indicators import update_indicators, calculate_indicators_full, update_latest_candle
 from models.types import Trade, Alert, TimeframeContext, State, StateSnapshot, ExecutionType
 from utils.logger import setup_logger
 
@@ -137,8 +137,8 @@ def main():
                     # 1. Get history
                     history = data_processor.get_history(symbol)
                     
-                    # 2. Update Indicators
-                    update_indicators(history, context=tf_context)
+                    # 2. Update Indicators (Incremental - FAST)
+                    update_latest_candle(history, context=tf_context)
                     
                     # 3. Analyze
                     current_state = symbol_states[symbol]
@@ -179,7 +179,17 @@ def main():
                 
                 # Update indicators again so history is clean for NEXT minute
                 history = processor.get_history(symbol)
-                update_indicators(history, context=context)
+                
+                # REPAIR CHAIN: Reconcile modified the previous candle (history[-1]).
+                # We must recalculate it (update_latest_candle on history)
+                # AND if there is a forming candle (active), we might need to recalc that too?
+                # Actually, reconcile_candle is typically called for the JUST CLOSED candle.
+                # So the "Tail" of history has changed. 
+                # We need to re-run incremental updates for the reconciled candle.
+                # If we had a forming candle in `active_candles`, that state is separate?
+                # DataProcessor `get_history` only returns CLOSED candles.
+                # So we just need to fix the last candle in history.
+                update_latest_candle(history, context=context)
                 
                 # 3. Callback (Analysis)
                 if callback:
@@ -287,13 +297,13 @@ def main():
     # Initialize History
     try:
         # --- 3m Initialization ---
-        history_map = client.fetch_historical_candles(lookback_bars=1000, context=tf_context)
+        history_map = client.fetch_historical_candles(lookback_bars=500, context=tf_context)
         data_processor.init_history(history_map)
         
         # Pre-calculate indicators for history so we start hot
         for symbol, hist in history_map.items():
             if hist:
-                update_indicators(hist, context=tf_context)
+                calculate_indicators_full(hist, context=tf_context)
                 # analyze prefetched history
                 state = symbol_states[symbol]
                 alerts = analyzer.analyze(symbol, hist, context=tf_context, state=state)
@@ -305,7 +315,7 @@ def main():
         data_processor_15m.init_history(history_map_15m)
         for symbol, hist in history_map_15m.items():
             if hist:
-                update_indicators(hist, context=tf_context_15m)
+                calculate_indicators_full(hist, context=tf_context_15m)
                 perm = analyzer.analyze_permission(symbol, hist, context=tf_context_15m)
                 if symbol in symbol_states:
                     symbol_states[symbol].permission = perm
@@ -316,7 +326,7 @@ def main():
         data_processor_1m.init_history(history_map_1m)
         for symbol, hist in history_map_1m.items():
             if hist:
-                update_indicators(hist, context=tf_context_1m)
+                calculate_indicators_full(hist, context=tf_context_1m)
                 # No need to analyze execution on history start, just have data ready
 
         # Force UI to render prefetched alerts
@@ -331,9 +341,8 @@ def main():
 
     # Graceful Shutdown
     def signal_handler(sig, frame):
-        logger.info("Shutting down...")
-        client.stop()
-        reconciliation_executor.shutdown(wait=False)
+        logger.info("Shutting down (Signal)...")
+        # Let the finally block handle cleanup by raising SystemExit
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
@@ -355,9 +364,14 @@ def main():
                     live.update(ui.generate_layout(), refresh=True)
                 time.sleep(0.1)
     except KeyboardInterrupt:
-        pass # logger.info("Keyboard Interrupt")
+        logger.info("Keyboard Interrupt")
     finally:
-        pass # client.stop()
+        logger.info("Performing cleanup...")
+        client.stop()
+        # Shutdown executor, don't wait for pending, cancel them if possible
+        # Python 3.9+ supports cancel_futures=True
+        reconciliation_executor.shutdown(wait=False, cancel_futures=True)
+        logger.info("Cleanup complete.")
 
 if __name__ == "__main__":
     main()

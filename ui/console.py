@@ -266,6 +266,11 @@ class ConsoleUI():
             elif alert.flow_regime == FlowRegime.CONFLICT:
                 regime_style = "yellow"
                 
+            # Pattern Style
+            pattern_str = alert.pattern.value
+            if alert.is_execution:
+                 pattern_str = f"[bold white on blue] {alert.pattern.value} [/]"
+
             # Format time: Milliseconds -> UTC -> Denver
             ts = pd.to_datetime(alert.timestamp, unit='ms').tz_localize('UTC').tz_convert('America/Denver')
             time_str = ts.strftime('%H:%M:%S')
@@ -279,7 +284,7 @@ class ConsoleUI():
             table.add_row(
                 time_str,
                 tv_link,
-                alert.pattern.value,
+                pattern_str,
                 alert.direction or "-",
                 f"{alert.price:.4f}",
                 f"[{regime_style}]{alert.flow_regime.value}[/]",
