@@ -66,6 +66,7 @@ class ConsoleUI():
 
     def feed_connected(self):
         self.status.feed_connected = True
+        self.status.last_error = None
         self.dirty = True
 
     def tick(self):
@@ -86,7 +87,7 @@ class ConsoleUI():
         self.alert_fired()
         self.dirty = True
 
-        logger.info(f"UI RECEIVED ALERT: {alert.symbol} {alert.pattern}")
+        logger.info(f"UI RECEIVED ALERT: {alert}")
 
     def update_state_monitor(self, states: Dict[str, StateSnapshot]):
         """
@@ -200,8 +201,24 @@ class ConsoleUI():
             # Permission String
             perm_str = "-"
             if snap.permission:
-                allow_color = "green" if snap.permission.allowed else "red"
-                perm_str = f"[{allow_color}]{snap.permission.bias} ({snap.permission.volatility_regime})[/]"
+                # 1. Bias Color
+                bias_color = "orange3" # Neutral default
+                if snap.permission.bias == "BULLISH":
+                    bias_color = "green"
+                elif snap.permission.bias == "BEARISH":
+                    bias_color = "red"
+                
+                # 2. Volatility Style
+                vol_style = ""
+                if snap.permission.volatility_regime == "HIGH":
+                    vol_style = "bold "
+                
+                # 3. Allowed Status (Dim if not allowed)
+                dim_style = "" if snap.permission.allowed else "dim "
+                
+                # Assemble
+                final_style = f"{dim_style}{vol_style}{bias_color}"
+                perm_str = f"[{final_style}]{snap.permission.bias} ({snap.permission.volatility_regime})[/]"
             
             # Reason
             reason = snap.act_reason if snap.state == State.ACT else (snap.watch_reason if snap.state == State.WATCH else "-")
@@ -257,14 +274,40 @@ class ConsoleUI():
             current_alerts = self.alerts[:]
             
         for alert in current_alerts:
-            # Color code regime
-            regime_style = "white"
-            if alert.flow_regime == FlowRegime.BULLISH_CONSENSUS:
-                regime_style = "bold green"
-            elif alert.flow_regime == FlowRegime.BEARISH_CONSENSUS:
-                regime_style = "bold red"
-            elif alert.flow_regime == FlowRegime.CONFLICT:
-                regime_style = "yellow"
+            # Color code regime using Z-Score tiers
+            # Slopes in Alert are normalized Z-Scores now
+            spot_z = alert.spot_slope
+            perp_z = alert.perp_slope
+            strongest_z = spot_z if abs(spot_z) > abs(perp_z) else perp_z
+            
+            z_mag = abs(strongest_z)
+            
+            # Tier Logic (Revised): Mild (<1.0), Moderate (1.0-2.0), Extreme (>2.0)
+            # Colors: Green/Red ONLY for CONSENSUS. Others blend in.
+            
+            base_color = "white"
+            style_prefix = ""
+            
+            # Helper to determine intensity
+            def get_style_prefix(z_val):
+                if z_val > 2.0: return "bold "
+                if z_val < 1.0: return "dim "
+                return ""
+
+            if FlowRegime.BULLISH_CONSENSUS in (alert.flow_regime,): # Enum check
+                 base_color = "green"
+                 style_prefix = get_style_prefix(z)
+            elif FlowRegime.BEARISH_CONSENSUS in (alert.flow_regime,):
+                 base_color = "red"
+                 style_prefix = get_style_prefix(z)
+            elif FlowRegime.CONFLICT in (alert.flow_regime,):
+                 base_color = "yellow"
+                 style_prefix = get_style_prefix(z)
+            
+            # Dominant/Conflict/Neutral -> White (Default)
+                
+            regime_style = f"{style_prefix}{base_color}"
+
                 
             # Pattern Style
             pattern_str = alert.pattern.value

@@ -14,56 +14,81 @@ class DataProcessor:
         from config.settings import CANDLE_TIMEFRAME_MINUTES
         self.tf_ms = int(context.interval_ms) if context else int(CANDLE_TIMEFRAME_MINUTES * 60 * 1000)
         
-        # symbol -> current_candle (Candle)
-        self.active_candles: Dict[str, Candle] = {}
         # symbol -> history of candles (list)
-        self.history: Dict[str, List[Candle]] = {}
+        self.spot_history: Dict[str, List[Candle]] = {}
+        self.perp_history: Dict[str, List[Candle]] = {}
+        
+        # symbol -> current_candle (Candle)
+        self.active_spot_candles: Dict[str, Candle] = {}
+        self.active_perp_candles: Dict[str, Candle] = {}
         
         # Throttling for UI updates
         self.last_tick_update_time = 0.0
         
-    def process_trade(self, trade: Trade) -> Optional[Candle]:
+    def process_trade(self, trade: Trade) -> tuple[Optional[Candle], Optional[Candle]]:
         """
         Ingest a trade, update the current candle. 
-        Returns a Candle if a candle just closed (for the PREVIOUS minute), else None.
+        Returns (closed_spot_candle, closed_perp_candle).
         """
         assert trade is not None
         assert trade.timestamp is not None
         symbol = trade.symbol
         
-        # Use stored timeframe interval
+        # Determine strict source context
+        is_spot = (trade.source == 'spot')
+        active_candles = self.active_spot_candles if is_spot else self.active_perp_candles
+        history_store = self.spot_history if is_spot else self.perp_history
+        
         minute_start_ms = (trade.timestamp // self.tf_ms) * self.tf_ms
         
         closed_candle = None
         
         # Check if we need to rotate the candle
-        if symbol in self.active_candles:
-            current_candle = self.active_candles[symbol]
+        if symbol in active_candles:
+            current_candle = active_candles[symbol]
             if current_candle.timestamp != minute_start_ms:
                 # Close the old candle
                 current_candle.closed = True
-                self._add_to_history(symbol, current_candle)
+                
+                # Add to correct history
+                if symbol not in history_store:
+                    history_store[symbol] = []
+                history_store[symbol].append(current_candle)
+                
+                 # Keep last 500 candles to prevent memory leak
+                if len(history_store[symbol]) > 500:
+                    history_store[symbol].pop(0)
+                    
                 closed_candle = current_candle
                 
                 # Start new candle
-                self.active_candles[symbol] = self._create_new_candle(trade, minute_start_ms, current_candle.close)
+                active_candles[symbol] = self._create_new_candle(trade, minute_start_ms, current_candle.close)
             else:
                 # Update existing candle
                 self._update_candle(current_candle, trade)
         else:
             # First candle for this symbol
-            self.active_candles[symbol] = self._create_new_candle(trade, minute_start_ms, trade.price)
+            active_candles[symbol] = self._create_new_candle(trade, minute_start_ms, trade.price)
+            
         if closed_candle:
-            self.status_sink.tick()
-            self.last_tick_update_time = time()
-        else:
-            # Throttle UI updates to 1s to prevent flicker but ensure "Last Tick" isn't stale
-            now = time()
-            if now - self.last_tick_update_time >= 1.0:
+            # Only tick UI on Spot closes? Or both? 
+            # Let's tick on Spot closes since that drives the "Last Tick" for the user usually.
+            if is_spot:
                 self.status_sink.tick()
-                self.last_tick_update_time = now
+                self.last_tick_update_time = time()
+        else:
+            # Throttle UI updates to 1s
+            if is_spot:
+                now = time()
+                if now - self.last_tick_update_time >= 1.0:
+                    self.status_sink.tick()
+                    self.last_tick_update_time = now
 
-        return closed_candle
+        # Logic: We return both potential closes.
+        if is_spot:
+            return closed_candle, None
+        else:
+            return None, closed_candle
 
     def _create_new_candle(self, trade: Trade, timestamp: int, open_price: float) -> Candle:
         candle = Candle(
@@ -79,15 +104,17 @@ class DataProcessor:
         return candle
 
     def _update_candle(self, candle: Candle, trade: Trade):
+        # Strict Segregation: Update only what this candle corresponds to.
+        # Note: 'candle' here is known to be the correct type (Spot or Perp) because of routing in process_trade.
+        
+        candle.volume += trade.quantity
+        
+        # Price Update (Native)
         candle.high = max(candle.high, trade.price)
         candle.low = min(candle.low, trade.price)
         candle.close = trade.price
-        candle.volume += trade.quantity
         
         # CVD Logic
-        # Buyer maker = sell side execution (downward pressure usually)
-        # But commonly: is_buyer_maker=True -> Sell, False -> Buy
-        # Delta = Volume if Buy, -Volume if Sell
         delta = trade.quantity if not trade.is_buyer_maker else -trade.quantity
         
         if trade.source == 'spot':
@@ -95,40 +122,55 @@ class DataProcessor:
         elif trade.source == 'perp':
             candle.perp_cvd += delta
 
-    def _add_to_history(self, symbol: str, candle: Candle):
-        if symbol not in self.history:
-            self.history[symbol] = []
-        self.history[symbol].append(candle)
-        # Keep last 500 candles (increased from 300, ~25h for 3m) to prevent memory leak
-        if len(self.history[symbol]) > 500:
-            self.history[symbol].pop(0)
+    # _add_to_history removed, logic moved inline to process_trade for separate streams
 
-    def update_history_candle(self, symbol: str, new_candle: Candle):
+    def update_history_candle(self, symbol: str, new_candle: Candle, source: str = 'spot'):
         """
         Replaces a candle in history with a reconciled version (e.g. from API).
         Preserves the CVD from the local version if the new version has 0.
         """
-        if symbol not in self.history:
+        history = self.spot_history if source == 'spot' else self.perp_history
+        
+        if symbol not in history:
             return
 
-        for i, c in enumerate(self.history[symbol]):
+        for i, c in enumerate(history[symbol]):
             if c.timestamp == new_candle.timestamp:
-                # Preserve locally calculated CVD since REST API doesn't have it
-                new_candle.spot_cvd = c.spot_cvd
-                new_candle.perp_cvd = c.perp_cvd
-                
-                self.history[symbol][i] = new_candle
-                logger.debug(f"Reconciled candle for {symbol} at {new_candle.timestamp}")
+                history[symbol][i] = new_candle
                 return
 
-    def get_history(self, symbol: str) -> List[Candle]:
-        return self.history.get(symbol, [])
+    def get_history(self, symbol: str, source: str = 'spot') -> List[Candle]:
+        if source == 'spot':
+             return self.spot_history.get(symbol, [])
+        else:
+             return self.perp_history.get(symbol, [])
 
-    def init_history(self, history: Dict[str, List[Candle]]):
+    def init_history(self, history: Dict[str, List[Candle]], source: str = 'spot'):
         """Initialize history with fetched candles"""
-        self.history = history
-        # Also initialize active_candles based on last history candle if needed?
-        # Actually, active_candle is for the *current* minute being built.
-        # History contains *closed* candles.
-        # So we just populate self.history.
-        logger.info(f"Initialized history for {len(history)} symbols")
+        if source == 'spot':
+            self.spot_history = history
+        else:
+            self.perp_history = history
+            
+        logger.info(f"Initialized {source} history for {len(history)} symbols")
+
+    def fill_gap_from_trades(self, symbol: str, trades: List[Trade]):
+        """
+        Replays a list of trades to reconstruct candles and CVD.
+        Used for backfilling gaps from aggTrades.
+        """
+        if not trades:
+            return
+
+        # Ensure trades are sorted
+        trades.sort(key=lambda x: x.timestamp)
+        
+        # We need to process these trades as if they were live.
+        # But we must ensure we don't start a new candle with a huge gap 
+        # without closing the previous one properly.
+        # process_trade handles logic: "if timestamp > active_candle + interval -> close active, start new".
+        
+        for trade in trades:
+            self.process_trade(trade)
+            
+        logger.info(f"Backfilled gap with {len(trades)} trades for {symbol}")

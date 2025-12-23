@@ -30,10 +30,18 @@ class BinanceClient:
         adapter = HTTPAdapter(max_retries=retries, pool_connections=50, pool_maxsize=50)
         self.session.mount('https://', adapter)
         self.session.mount('http://', adapter)
+        
+        # Gap Detection
+        self.backfill_callback: Optional[Callable[[str, List[Trade]], None]] = None
+        self.last_msg_time_ms = int(time.time() * 1000) # Initialize to now to avoid startup gap
         logger.info(f"BinanceClient instance created: {id(self)}")
+        
+    def set_backfill_callback(self, callback: Callable[[str, List[Trade]], None]):
+        self.backfill_callback = callback
 
     def _on_message_spot(self, ws, message):
         self.metrics["ws_messages_total"] += 1
+        self.last_msg_time_ms = int(time.time() * 1000)
 
         try:
             data = json.loads(message)
@@ -67,6 +75,7 @@ class BinanceClient:
 
     def _on_message_perp(self, ws, message):
         self.metrics["ws_messages_total"] += 1
+        self.last_msg_time_ms = int(time.time() * 1000)
 
         try:
             data = json.loads(message)
@@ -131,16 +140,42 @@ class BinanceClient:
         }
         ws.send(json.dumps(subscribe_msg))
         logger.info(f"Subscribed to {len(self.symbols)} symbols")
+        
+        # Check for gap
+        now = int(time.time() * 1000)
+        gap_ms = now - self.last_msg_time_ms
+        if gap_ms > 2000: # 2 seconds threshold
+             logger.warning(f"Detected connection gap of {gap_ms}ms. Triggering backfill...")
+             start_ts = self.last_msg_time_ms
+             end_ts = now
+             threading.Thread(target=self._perform_backfill, args=(start_ts, end_ts), daemon=True).start()
 
-    def fetch_historical_candles(self, lookback_bars: int = 1000, context: Optional["TimeframeContext"] = None) -> Dict[str, List[Candle]]:
+    def _perform_backfill(self, start_ts: int, end_ts: int):
+        if not self.backfill_callback:
+            return
+            
+        logger.info(f"Backfilling gap: {start_ts} to {end_ts} ({end_ts - start_ts}ms)")
+        for symbol in self.symbols:
+             trades = self.fetch_agg_trades(symbol, start_ts, end_ts)
+             if trades:
+                 try:
+                     self.backfill_callback(symbol, trades)
+                 except Exception as e:
+                     logger.error(f"Backfill callback failed for {symbol}: {e}")
+        logger.info("Backfill complete.")
+
+    def fetch_historical_candles(self, lookback_bars: int = 1000, context: Optional["TimeframeContext"] = None, kline_end_time: Optional[int] = None, source: str = 'spot') -> Dict[str, List[Candle]]:
         """
         Fetch historical klines for all symbols via REST API to initialize history.
-        Uses Binance Spot API.
+        source: 'spot' or 'perp'
         """
         history = {}
-        logger.info(f"Fetching {lookback_bars} bars of history for {len(self.symbols)} symbols...")
+        logger.info(f"Fetching {lookback_bars} bars of {source} history for {len(self.symbols)} symbols...")
         
-        base_url = "https://api.binance.com/api/v3/klines"
+        # Spot: https://api.binance.com/api/v3/klines
+        # Perp: https://fapi.binance.com/fapi/v1/klines
+        
+        base_url = "https://api.binance.com/api/v3/klines" if source == 'spot' else "https://fapi.binance.com/fapi/v1/klines"
         
         # Use context interval if available
         interval = f"{int(context.interval_ms // 60000)}m" if context else f"{CANDLE_TIMEFRAME_MINUTES}m"
@@ -153,13 +188,26 @@ class BinanceClient:
                     "interval": interval,
                     "limit": lookback_bars
                 }
+                if kline_end_time:
+                    params["endTime"] = kline_end_time
+                
                 resp = self.session.get(base_url, params=params, timeout=10)
                 resp.raise_for_status()
                 data = resp.json()
                 
                 candles = []
                 for k in data:
-                    # k schema: [Open time, Open, High, Low, Close, Volume, Close time, ...]
+                    # k schema: 
+                    # 0: Open time, 1: Open, 2: High, 3: Low, 4: Close, 5: Volume, 
+                    # 6: Close time, 7: Quote Vol, 8: Trades, 9: Taker Buy Base Asset Vol, ...
+                    
+                    vol = float(k[5])
+                    taker_buy_vol = float(k[9])
+                    
+                    # CVD Approximation for History: 2 * TakerBuy - TotalVolume
+                    # (Buy Vol - Sell Vol) = (TakerBuy) - (Total - TakerBuy) = 2*TakerBuy - Total
+                    cvd_val = 2 * taker_buy_vol - vol
+                    
                     c = Candle(
                         symbol=symbol,
                         timestamp=k[0],
@@ -167,10 +215,10 @@ class BinanceClient:
                         high=float(k[2]),
                         low=float(k[3]),
                         close=float(k[4]),
-                        volume=float(k[5]),
-                        spot_cvd=0.0,
-                        perp_cvd=0.0,
-                        closed=True
+                        volume=vol,
+                        closed=True,
+                        spot_cvd=cvd_val if source == 'spot' else 0.0,
+                        perp_cvd=cvd_val if source == 'perp' else 0.0
                     )
                     candles.append(c)
                 
@@ -181,16 +229,16 @@ class BinanceClient:
                     time.sleep(0.1)
                 
             except Exception as e:
-                logger.error(f"Failed to fetch history for {symbol}: {e}")
+                logger.error(f"Failed to fetch {source} history for {symbol}: {e}")
                 
         return history
 
-    def fetch_latest_candle(self, symbol: str, context: Optional["TimeframeContext"] = None) -> requests.Response:
+    def fetch_latest_candle(self, symbol: str, context: Optional["TimeframeContext"] = None, source: str = 'spot') -> requests.Response:
         """
         Fetch the most recently closed candle for a specific symbol via REST API.
         This is used for reconciliation.
         """
-        base_url = "https://api.binance.com/api/v3/klines"
+        base_url = "https://api.binance.com/api/v3/klines" if source == 'spot' else "https://fapi.binance.com/fapi/v1/klines"
         interval = f"{int(context.interval_ms // 60000)}m" if context else f"{CANDLE_TIMEFRAME_MINUTES}m"
         try:
             # We want the LAST closed candle. 
@@ -208,6 +256,10 @@ class BinanceClient:
             if len(data) >= 2:
                 # data[-2] is the fully closed candle we want
                 k = data[-2]
+                vol = float(k[5])
+                taker_buy_vol = float(k[9])
+                cvd_val = 2 * taker_buy_vol - vol
+                
                 return Candle(
                     symbol=symbol,
                     timestamp=k[0],
@@ -215,15 +267,14 @@ class BinanceClient:
                     high=float(k[2]),
                     low=float(k[3]),
                     close=float(k[4]),
-                    volume=float(k[5]),
-                    spot_cvd=0.0, # REST API doesn't give us CVD, we must preserve or approximate? 
-                                  # Ideally we preserve the local CVD but correct the Prices/Volume.
-                    perp_cvd=0.0,
+                    volume=vol,
+                    spot_cvd=cvd_val if source == 'spot' else 0.0,
+                    perp_cvd=cvd_val if source == 'perp' else 0.0,
                     closed=True
                 )
         except Exception as e:
             # Log specific error if it's related to connections
-            logger.error(f"Failed to fetch latest candle for {symbol}: {e}")
+            logger.error(f"Failed to fetch {source} latest candle for {symbol}: {e}")
         return None
 
     def start(self):
@@ -255,7 +306,10 @@ class BinanceClient:
                 try:
                     logger.info(f"Starting {name} Websocket run_forever loop...")
                     # run_forever blocks until disconnection
-                    ws_app.run_forever(ping_interval=20, ping_timeout=10)
+                    # Optimized Settings based on data (Max lag observed = 18s)
+                    # Timeout=30s provides >1.5x safety buffer against local blocking.
+                    # Interval=35s satisfies library constraint (Interval > Timeout) and gives ~65s zombie detection.
+                    ws_app.run_forever(ping_interval=35, ping_timeout=30)
                     
                     if not self.keep_running:
                         break
@@ -284,3 +338,87 @@ class BinanceClient:
         # Close the http session
         if self.session:
             self.session.close()
+
+    def fetch_agg_trades(self, symbol: str, start_time: int, end_time: int) -> List[Trade]:
+        """
+        Fetch raw aggTrades for a specific time range. 
+        Handles pagination (limit 1000 per request).
+        """
+        trades = []
+        current_start = start_time
+        
+        # Determine source and URL based on symbol or config?
+        # For now, we assume standard pairs. 
+        # Ideally, we should know if a symbol is spot or perp. 
+        # But our system mixes them (AAVEUSDT implies both).
+        # We need to fetch BOTH Spot and Perp trades for the same ticker!
+        
+        # --- Helper to fetch from one source ---
+        def _fetch_source(url_base: str, source_type: str):
+            source_trades = []
+            curr = start_time
+            while True:
+                if curr >= end_time:
+                    break
+                
+                params = {
+                    "symbol": symbol.upper(),
+                    "startTime": curr,
+                    "endTime": end_time,
+                    "limit": 1000
+                }
+                
+                try:
+                    resp = self.session.get(url_base, params=params, timeout=10)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    
+                    if not data:
+                        break
+                        
+                    for t in data:
+                        # aggTrade format:
+                        # Spot: { "a": 26129, "p": "0.01633102", "q": "4.70443515", "f": 27781, "l": 27781, "T": 1498793709153, "m": true, "M": true }
+                        # Perp: { "a": 26129, "p": "0.01633102", "q": "4.70443515", "f": 27781, "l": 27781, "T": 1498793709153, "m": true }
+                        ts = int(t['T'])
+                        if ts > end_time:
+                            break
+                            
+                        tr = Trade(
+                            symbol=symbol.upper(),
+                            price=float(t['p']),
+                            quantity=float(t['q']),
+                            timestamp=ts,
+                            is_buyer_maker=t['m'],
+                            source=source_type
+                        )
+                        source_trades.append(tr)
+                        
+                    # Update cursor to last timestamp + 1 to avoid dupes
+                    last_ts = int(data[-1]['T'])
+                    if last_ts == curr:
+                         # Stuck loop protection
+                         curr += 1000 
+                    else:
+                         curr = last_ts + 1
+                         
+                    # Optimization: if we got < 1000, we're likely done
+                    if len(data) < 1000:
+                        break
+                        
+                except Exception as e:
+                    logger.error(f"Failed to fetch aggTrades for {symbol} ({source_type}): {e}")
+                    break
+            return source_trades
+
+        # Fetch Spot
+        spot_trades = _fetch_source("https://api.binance.com/api/v3/aggTrades", "spot")
+        
+        # Fetch Perp
+        perp_trades = _fetch_source("https://fapi.binance.com/fapi/v1/aggTrades", "perp")
+        
+        # Merge and Sort
+        all_trades = spot_trades + perp_trades
+        all_trades.sort(key=lambda x: x.timestamp)
+        
+        return all_trades

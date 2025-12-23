@@ -46,7 +46,8 @@ class Analyzer:
         symbol: str, 
         candles: List[Candle], 
         context: Optional["TimeframeContext"] = None,
-        state: Optional["StateSnapshot"] = None
+        state: Optional["StateSnapshot"] = None,
+        perp_candles: Optional[List[Candle]] = None
     ) -> List[Alert]:
         if len(candles) < self.MIN_HISTORY:
             return []
@@ -57,10 +58,35 @@ class Analyzer:
         if state:
             state.last_updated_at = current_candle.timestamp
 
+        # --- FLOW REGIME FIX (Segregation) ---
+        # If we have separate perp candles, inject the Perp CVD slope into the Spot Candle
+        # so that _determine_regime and patterns can see the full picture.
+        if perp_candles:
+            # Try to match the last candle (fastest)
+            if perp_candles[-1].timestamp == current_candle.timestamp:
+                pc = perp_candles[-1]
+                current_candle.perp_cvd_slope = pc.perp_cvd_slope
+                current_candle.perp_cvd = pc.perp_cvd
+            else:
+                 # Search backwards
+                 for pc in reversed(perp_candles):
+                     if pc.timestamp == current_candle.timestamp:
+                         current_candle.perp_cvd_slope = pc.perp_cvd_slope
+                         current_candle.perp_cvd = pc.perp_cvd
+                         break
+
         regime = self._determine_regime(candles, current_candle)
+        
+        # Populate Visual Flow Strength in State
+        if state:
+            state.flow_regime = regime.name
+            # Get Max Z-Score for strength
+            spot_z = current_candle.spot_cvd_slope_z if current_candle.spot_cvd_slope_z else 0.0
+            perp_z = current_candle.perp_cvd_slope_z if current_candle.perp_cvd_slope_z else 0.0
+            state.flow_score = max(abs(spot_z), abs(perp_z))
 
         alerts: List[Alert] = []
-
+        
         # --- Pattern A: VWAP Reclaim ---
         if self._check_vwap_reclaim(candles, current_candle, regime):
             score = self._calculate_score(PatternType.VWAP_RECLAIM, candles, current_candle, regime)
@@ -177,7 +203,8 @@ class Analyzer:
                 state.entered_at = current_candle.timestamp
                 # last_updated_at was already updated at top of method
                 state.watch_reason = qualifying_patterns[0]
-                state.active_patterns.extend(qualifying_patterns)
+                state.active_patterns = list(qualifying_patterns)
+                logger.info(f"PROMOTION: {symbol} IGNORE->WATCH (Reason: {state.watch_reason}) At={state.entered_at}")
 
         # --- State Promotion Logic: WATCH -> ACT ---
         elif state and state.state == State.WATCH:
@@ -226,6 +253,19 @@ class Analyzer:
 
                      state.act_direction = direction
 
+                     # Fix: Validate direction against 15m Permission Bias
+                     # If conflicting, abort promotion (revert to WATCH)
+                     if state.permission and state.permission.bias:
+                         bias = state.permission.bias
+                         if (bias == "BULLISH" and direction == "SHORT") or \
+                            (bias == "BEARISH" and direction == "LONG"):
+                             # Conflict detected - Abort Promotion
+                             state.state = State.WATCH
+                             state.act_reason = None
+                             state.act_direction = None
+                             state.active_patterns = [state.watch_reason] if state.watch_reason else []
+                             state.reasons.append(f"Blocked ACT promotion: Bias {bias} conflicts with {direction}")
+
         # --- Demotion Logic: ACT -> WATCH ---
         if state and state.state == State.ACT:
             duration = current_candle.timestamp - state.entered_at
@@ -234,29 +274,50 @@ class Analyzer:
             timeout = duration > MAX_ACT_DURATION_MS
             # 2. Permission Revoked
             perm_revoked = state.permission and not state.permission.allowed
-            # 3. Disqualifying Pattern
+            
+            # 3. Bias Conflict (New)
+            bias_conflict = False
+            if state.act_direction and state.permission and state.permission.bias:
+                bias = state.permission.bias
+                if (bias == "BULLISH" and state.act_direction == "SHORT") or \
+                   (bias == "BEARISH" and state.act_direction == "LONG"):
+                    bias_conflict = True
+
+            # 4. Disqualifying Pattern
             disqualified = any(
                 a.pattern.value in ACT_DEMOTION_PATTERNS 
                 for a in alerts
             )
             
-            if timeout or perm_revoked or disqualified:
+            if timeout or perm_revoked or disqualified or bias_conflict:
                 old_reason = state.act_reason
                 state.state = State.WATCH
                 state.entered_at = current_candle.timestamp
                 state.act_reason = None
                 
-                reason_msg = "ACT Timeout" if timeout else ("Permission Revoked" if perm_revoked else "Disqualifying Pattern")
+                reason_msg = "ACT Timeout" if timeout else ("Permission Revoked" if perm_revoked else ("Bias Conflict" if bias_conflict else "Disqualifying Pattern"))
                 state.reasons.append(f"Demoted ACT->WATCH: {reason_msg} (was {old_reason})")
+                
+                # Reset patterns and direction
+                state.active_patterns = [state.watch_reason] if state.watch_reason else []
+                state.act_direction = None
 
         # --- Demotion Logic: WATCH -> IGNORE ---
         if state and state.state == State.WATCH:
              duration = current_candle.timestamp - state.entered_at
+             # DEBUG: Trace WATCH timer to debug "stuck" states
+             # logger.debug(f"DEBUG_WATCH_TIMER: {symbol} Duration={duration/1000:.1f}s Max={MAX_WATCH_DURATION_MS/1000}s EnteredAt={state.entered_at}")
+             
              if duration > MAX_WATCH_DURATION_MS:
+                 logger.info(f"DEMOTION: {symbol} WATCH->IGNORE (Timeout: {duration/1000:.0f}s > {MAX_WATCH_DURATION_MS/1000}s)")
                  old_reason = state.watch_reason
                  state.state = State.IGNORE
                  state.watch_reason = None
                  state.reasons.append(f"Demoted WATCH->IGNORE: Timeout (was {old_reason})")
+                 
+                 # Reset patterns and direction
+                 state.active_patterns = []
+                 state.act_direction = None
         
         # --- Alert Gating & Direction Injection ---
         # Suppress alerts unless state is ACT
@@ -392,9 +453,11 @@ class Analyzer:
     # Flow Regime
     # ------------------------------------------------------------------
     def _get_flow_slopes(self, current: Candle) -> Tuple[float, float]:
-        spot_slope = current.spot_cvd_slope if current.spot_cvd_slope is not None else 0.0
-        perp_slope = current.perp_cvd_slope if current.perp_cvd_slope is not None else 0.0
-        return float(spot_slope), float(perp_slope)
+        # USE Z-SCORES for Logic Normalization
+        # Fallback to 0 if Not Calculated Yet
+        spot_z = current.spot_cvd_slope_z if current.spot_cvd_slope_z is not None else 0.0
+        perp_z = current.perp_cvd_slope_z if current.perp_cvd_slope_z is not None else 0.0
+        return float(spot_z), float(perp_z)
 
     def _determine_regime(self, candles: List[Candle], current: Candle) -> FlowRegime:
 
@@ -431,10 +494,20 @@ class Analyzer:
         if abs(spot_slope) > abs(perp_slope):
             return FlowRegime.SPOT_DOMINANT
         if abs(perp_slope) > abs(spot_slope):
-            return FlowRegime.PERP_DOMINANT
-
-        # Fallback
-        return FlowRegime.NEUTRAL
+            result = FlowRegime.PERP_DOMINANT
+        else:
+            result = FlowRegime.NEUTRAL
+            
+        # DEBUG: Log to console to show user life signs
+        # Import logger at top or use printed logic if logger not available? 
+        # Analyzer has 'import logging' typically.
+        # Let's assume 'logger' is available globally or I need to get it.
+        # Actually, self.logger might not exist.
+        import logging
+        logger = logging.getLogger("scanner")
+        logger.info(f"REGIME_DEBUG: {current.symbol} Spot={spot_slope:.3f} Perp={perp_slope:.3f} ATR%={current.atr_percentile} -> {result}")
+        
+        return result
 
     # ------------------------------------------------------------------
     # Helpers
@@ -872,6 +945,9 @@ class Analyzer:
         direction: Optional[str] = None
     ) -> Alert:
         tf_name = context.name if context else "3m"
+        spot_slope = candle.spot_cvd_slope if candle.spot_cvd_slope is not None else 0.0
+        perp_slope = candle.perp_cvd_slope if candle.perp_cvd_slope is not None else 0.0
+        
         return Alert(
             timestamp=int(time.time() * 1000),
             candle_timestamp=candle.timestamp,
@@ -880,9 +956,15 @@ class Analyzer:
             score=score,
             flow_regime=regime,
             price=candle.close,
-            message=f"{pattern.value} detected in {regime.value}",
+            message=f"{pattern.value} detected ({regime.value})",
             timeframe=tf_name,
-            direction=direction
+            direction=direction,
+            spot_slope=float(spot_slope),
+            perp_slope=float(perp_slope),
+            # Debug
+            atr_percentile=candle.atr_percentile,
+            spot_cvd=candle.spot_cvd,
+            perp_cvd=candle.perp_cvd
         )
 
     # ------------------------------------------------------------------

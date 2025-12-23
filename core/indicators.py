@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from typing import List, Optional
 from models.types import Candle, TimeframeContext
-from config.settings import ATR_WINDOW, ATR_PERCENTILE_WINDOW
+from config.settings import ATR_WINDOW, ATR_PERCENTILE_WINDOW, SLOPE_Z_SCORE_WINDOW
 from datetime import datetime, timezone
 
 # --- Core Math Helpers ---
@@ -23,7 +23,22 @@ def _calculate_slope_tail(series: List[float], period: int = 5) -> float:
     slope = np.polyfit(x, y, 1)[0]
     return float(slope)
 
+def _calculate_zscore(last_val: float, history: List[float]) -> float:
+    """Calculate Z-Score of last_val against history distribution."""
+    if not history or len(history) < 2:
+        return 0.0
+    
+    # Simple perf optimization: use numpy
+    mean = np.mean(history)
+    std = np.std(history)
+    
+    if std == 0:
+        return 0.0
+        
+    return float((last_val - mean) / std)
+
 # --- Full Calculation (Initialization) ---
+
 
 def calculate_indicators_full(candles: List[Candle], atr_period: int = ATR_WINDOW, context: Optional["TimeframeContext"] = None):
     """
@@ -88,6 +103,11 @@ def calculate_indicators_full(candles: List[Candle], atr_period: int = ATR_WINDO
     
     # Batch calculate slopes/percentiles
     # This is O(N*W) but acceptable for init
+    
+    # Track slopes for Z-Score
+    spot_slopes_history = []
+    perp_slopes_history = []
+    
     for i in range(len(candles)):
         # Slope Window
         start = max(0, i - 4) # 5 points including i
@@ -96,6 +116,22 @@ def calculate_indicators_full(candles: List[Candle], atr_period: int = ATR_WINDO
         c.vwap_slope = _calculate_slope_tail(vwaps[start:i+1])
         c.spot_cvd_slope = _calculate_slope_tail(spot_cum[start:i+1])
         c.perp_cvd_slope = _calculate_slope_tail(perp_cum[start:i+1])
+        
+        spot_slopes_history.append(c.spot_cvd_slope)
+        perp_slopes_history.append(c.perp_cvd_slope)
+        
+        # Z-Score Normalization
+        # Lookback window for Z-Score statistics
+        z_start = max(0, len(spot_slopes_history) - SLOPE_Z_SCORE_WINDOW)
+        
+        c.spot_cvd_slope_z = _calculate_zscore(
+            c.spot_cvd_slope, 
+            spot_slopes_history[z_start:]
+        )
+        c.perp_cvd_slope_z = _calculate_zscore(
+            c.perp_cvd_slope, 
+            perp_slopes_history[z_start:]
+        )
         
         # ATR Percentile Window
         p_start = max(0, i - ATR_PERCENTILE_WINDOW + 1)
@@ -109,16 +145,28 @@ def calculate_indicators_full(candles: List[Candle], atr_period: int = ATR_WINDO
 
 # --- Incremental Calculation (Fast Path) ---
 
-def update_latest_candle(history: List[Candle], context: Optional["TimeframeContext"] = None, atr_period: int = ATR_WINDOW):
+def update_indicators_from_index(history: List[Candle], start_index: int, context: Optional["TimeframeContext"] = None):
     """
-    O(1) Update for the last candle in history using the previous candle's state.
-    Assumes history[-2] is valid and fully calculated.
+    Repair the indicator chain starting from a specific index `start_index` to the end.
+    Crucial for fixing 'broken chains' after backfilling or reconciliation.
     """
     if not history:
         return
         
-    curr = history[-1]
-    prev = history[-2] if len(history) > 1 else None
+    start = max(0, start_index)
+    for i in range(start, len(history)):
+        update_candle_at_index(history, i, context)
+
+def update_candle_at_index(history: List[Candle], index: int, context: Optional["TimeframeContext"] = None, atr_period: int = ATR_WINDOW):
+    """
+    O(1) Update for a specific candle index using the previous candle's state.
+    Calculates VWAP, CVD, ATR, Slopes, and Percentiles.
+    """
+    if not history or index < 0 or index >= len(history):
+        return
+        
+    curr = history[index]
+    prev = history[index-1] if index > 0 else None
     
     # 1. VWAP (Incremental)
     typical_price = (curr.high + curr.low + curr.close) / 3.0
@@ -149,51 +197,29 @@ def update_latest_candle(history: List[Candle], context: Optional["TimeframeCont
     curr.cum_spot_cvd = (prev.cum_spot_cvd if prev else 0.0) + curr.spot_cvd
     curr.cum_perp_cvd = (prev.cum_perp_cvd if prev else 0.0) + curr.perp_cvd
     
-    # 3. ATR (Incremental Smoothing - Wilder's or SMA?)
-    # Original implementation was Rolling Mean (SMA) of TR
-    # SMA requires full window sum. 
-    # To keep it strict O(1) without storing window sum, we can peek back.
-    # Since we have the history list, accessing history[-14:] is O(1) (fixed size slice)
+    # 3. ATR (Incremental Calculation on the fly)
     
-    # TR Calculation
-    if prev:
-        tr1 = curr.high - curr.low
-        tr2 = abs(curr.high - prev.close)
-        tr3 = abs(curr.low - prev.close)
-        tr = max(tr1, tr2, tr3)
-    else:
-        tr = curr.high - curr.low
-        
-    # Standard SMA ATR (compatible with rolling(14).mean())
-    # We need to average the TRs of the last N candles.
-    # We don't store TRs on the object, so we must compute TRs for the last N candles on the fly.
-    # Cost: 14 operations. Fast enough.
+    # We need the last N candles ending at `index`
+    # lookback length
+    window_len = min(index + 1, atr_period)
     
-    tr_sum = tr
-    count = 1
-    
-    # Walk back up to (atr_period - 1) steps
-    # We need prev closes, so we iterate
-    lookback = min(len(history), atr_period)
-    
-    # Optimize: If strictly incrementally maintaining SMA is hard without storing TR,
-    # we can re-compute TRs for the small window. 14 items is negligible.
-    
-    # Let's just grab the last N candles to compute ATR.
-    # This is effectively O(N) where N=14. Constant time relative to history length.
-    window_candidates = history[-lookback:] 
+    # Extract window: ending at index (inclusive)
+    # Start index for slice: index + 1 - window_len
+    start_idx = index + 1 - window_len
+    window_candidates = history[start_idx : index + 1]
     
     if len(window_candidates) < atr_period:
-        curr.atr = 0.0 # Not enough data
+        curr.atr = 0.0 
     else:
         # Compute TR for the window
         trs = []
         for i in range(len(window_candidates)):
             c = window_candidates[i]
+            # Actual index in history
+            hist_idx = start_idx + i
+            
             if i == 0:
-                 # If this is the start of the window, we need the candle BEFORE it to get TR
-                 # Use history index
-                 hist_idx = len(history) - lookback + i
+                 # Start of window, look at previous candle in history
                  p = history[hist_idx - 1] if hist_idx > 0 else None
             else:
                  p = window_candidates[i-1]
@@ -209,32 +235,51 @@ def update_latest_candle(history: List[Candle], context: Optional["TimeframeCont
         curr.atr = sum(trs) / len(trs)
         
     # 4. Slopes (O(period) = O(5))
+    # Window ending at index
+    slope_window_len = 5
+    s_start = max(0, index + 1 - slope_window_len)
+    
     # VWAP Slope
-    # Extract last 5 VWAPs
-    vwap_window = [c.vwap for c in history[-5:] if c.vwap is not None]
+    vwap_window = [c.vwap for c in history[s_start : index+1] if c.vwap is not None]
     curr.vwap_slope = _calculate_slope_tail(vwap_window)
     
     # CVD Slopes
-    spot_cvd_window = [c.cum_spot_cvd for c in history[-5:]] # usage of CUMULATIVE
+    spot_cvd_window = [c.cum_spot_cvd for c in history[s_start : index+1]] 
     curr.spot_cvd_slope = _calculate_slope_tail(spot_cvd_window)
 
-    perp_cvd_window = [c.cum_perp_cvd for c in history[-5:]]
+    perp_cvd_window = [c.cum_perp_cvd for c in history[s_start : index+1]]
     curr.perp_cvd_slope = _calculate_slope_tail(perp_cvd_window)
     
-    # 5. ATR Percentile (O(100))
-    # Extract last 100 ATRs
-    atr_window = [c.atr for c in history[-ATR_PERCENTILE_WINDOW:] if c.atr is not None]
+    # 5. Z-Score Normalization (Incremental)
+    # We need the last N calculated slopes.
+    z_start = max(0, index + 1 - SLOPE_Z_SCORE_WINDOW)
+    
+    # Spot Z
+    # Filter for None to be safe, though update_indicators_from_index should ensure continuity
+    spot_slope_hist = [c.spot_cvd_slope for c in history[z_start : index+1] if c.spot_cvd_slope is not None]
+    curr.spot_cvd_slope_z = _calculate_zscore(curr.spot_cvd_slope, spot_slope_hist)
+    
+    # Perp Z
+    perp_slope_hist = [c.perp_cvd_slope for c in history[z_start : index+1] if c.perp_cvd_slope is not None]
+    curr.perp_cvd_slope_z = _calculate_zscore(curr.perp_cvd_slope, perp_slope_hist)
+    
+    # 6. ATR Percentile
+    pct_start = max(0, index + 1 - ATR_PERCENTILE_WINDOW)
+    atr_window = [c.atr for c in history[pct_start : index+1] if c.atr is not None]
+    
     if len(atr_window) >= 2:
-        # Percentile of current (last item) relative to window
         curr_atr = atr_window[-1]
-        # Count how many are <= current
-        # Scipy/Pandas rank is roughly: count(x <= val) / N * 100
         count_lte = sum(1 for x in atr_window if x <= curr_atr)
         curr.atr_percentile = (count_lte / len(atr_window)) * 100.0
     else:
         curr.atr_percentile = 50.0
 
-# Alias for compatibility if needed, but we should switch calls to update_latest_candle
-update_indicators = calculate_indicators_full
+def update_latest_candle(history: List[Candle], context: Optional["TimeframeContext"] = None, atr_period: int = ATR_WINDOW):
+    """
+    Update only the last candle (convenience wrapper).
+    """
+    if not history:
+        return
+    update_candle_at_index(history, len(history) - 1, context, atr_period)
 
 

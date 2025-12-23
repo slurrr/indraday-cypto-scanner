@@ -63,6 +63,9 @@ class Candle:
     atr_percentile: Optional[float] = None
     spot_cvd_slope: Optional[float] = None
     perp_cvd_slope: Optional[float] = None
+    spot_cvd_slope_z: Optional[float] = None # Z-Score normalized slope
+    perp_cvd_slope_z: Optional[float] = None # Z-Score normalized slope
+
 
     # Cumulative State (for incremental updates)
     cum_pv: float = 0.0
@@ -92,6 +95,9 @@ class StateSnapshot:
     reasons: List[str] = field(default_factory=list)
     active_patterns: List[str] = field(default_factory=list)
     permission: Optional["PermissionSnapshot"] = None
+    # Visual Flow Strength
+    flow_regime: Optional[str] = None
+    flow_score: float = 0.0 # Max absolute Z-Score
 
 @dataclass
 class PermissionSnapshot:
@@ -114,14 +120,21 @@ class Alert:
     price: float
     message: str
     direction: Optional[str] = None
-    timeframe: str = "3m"  # Default for backward compatibility during refactor
+    timeframe: str = "3m"
+    spot_slope: float = 0.0
+    perp_slope: float = 0.0
+    # Debug fields
+    atr_percentile: Optional[float] = None
+    spot_cvd: Optional[float] = None
+    perp_cvd: Optional[float] = None
 
     @property
     def is_execution(self) -> bool:
         return isinstance(self.pattern, ExecutionType)
     
     def __str__(self):
-        return f"[{self.timeframe}] {self.symbol} | {self.pattern.value} | {self.flow_regime.value} | Score: {self.score:.1f}"
+        atr_str = f"{self.atr_percentile:.1f}" if self.atr_percentile is not None else "-"
+        return f"[{self.timeframe}] {self.symbol} | {self.pattern.value} | {self.flow_regime.value} | Score: {self.score:.1f} | S: {self.spot_slope:.1f} P: {self.perp_slope:.1f} | ATR%: {atr_str}"
 
 @dataclass
 class ExecutionSignal:
