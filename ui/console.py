@@ -1,7 +1,7 @@
 from rich.table import Table
 from rich.layout import Layout
 import threading
-from config.settings import ENABLE_STATE_MONITOR
+from config.settings import ENABLE_STATE_MONITOR, PERP_SYMBOL_MAPPING
 from typing import List, Dict
 import pandas as pd
 from models.types import Alert, FlowRegime, State, StateSnapshot
@@ -275,9 +275,9 @@ class ConsoleUI():
             
         for alert in current_alerts:
             # Color code regime using Z-Score tiers
-            # Slopes in Alert are normalized Z-Scores now
-            spot_z = alert.spot_slope
-            perp_z = alert.perp_slope
+            # Slopes in Alert are RAW, but we added _z fields for coloring
+            spot_z = alert.spot_slope_z
+            perp_z = alert.perp_slope_z
             strongest_z = spot_z if abs(spot_z) > abs(perp_z) else perp_z
             
             z_mag = abs(strongest_z)
@@ -296,13 +296,13 @@ class ConsoleUI():
 
             if FlowRegime.BULLISH_CONSENSUS in (alert.flow_regime,): # Enum check
                  base_color = "green"
-                 style_prefix = get_style_prefix(z)
+                 style_prefix = get_style_prefix(z_mag)
             elif FlowRegime.BEARISH_CONSENSUS in (alert.flow_regime,):
                  base_color = "red"
-                 style_prefix = get_style_prefix(z)
+                 style_prefix = get_style_prefix(z_mag)
             elif FlowRegime.CONFLICT in (alert.flow_regime,):
                  base_color = "yellow"
-                 style_prefix = get_style_prefix(z)
+                 style_prefix = get_style_prefix(z_mag)
             
             # Dominant/Conflict/Neutral -> White (Default)
                 
@@ -324,14 +324,20 @@ class ConsoleUI():
                 f"{alert.symbol}[/link]"
             )
 
+            # Price Scaling for 1000PEPE etc.
+            display_price = alert.price
+            mapped_sym = PERP_SYMBOL_MAPPING.get(alert.symbol)
+            if mapped_sym and mapped_sym.startswith("1000"):
+                 display_price *= 1000.0
+
             table.add_row(
                 time_str,
                 tv_link,
                 pattern_str,
                 alert.direction or "-",
-                f"{alert.price:.4f}",
+                f"{display_price:.4f}",
                 f"[{regime_style}]{alert.flow_regime.value}[/]",
-                str(alert.score)
+                str(round(alert.score))
             )
         return table
 

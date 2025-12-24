@@ -49,13 +49,18 @@ def _ensure_listener(log_file: str, level, max_bytes: int, backup_count: int) ->
 
     return QueueHandler(q)
 
+import os
+
 def setup_logger(
     name: str,
-    log_file: str = "utils/scanner.log",
+    log_file: str = None,
     level=LOG_LEVEL,
     max_bytes: int = 1024 * 1024 * 5,
     backup_count: int = 6,
 ):
+    if log_file is None:
+        log_file = os.getenv("SCANNER_LOG_FILE", "utils/scanner.log")
+        
     logger = logging.getLogger(name)
     logger.setLevel(level)
     logger.propagate = False

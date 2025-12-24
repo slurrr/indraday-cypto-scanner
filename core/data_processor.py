@@ -13,6 +13,7 @@ class DataProcessor:
         # Default to 3m/180000ms if not provided (transition period)
         from config.settings import CANDLE_TIMEFRAME_MINUTES
         self.tf_ms = int(context.interval_ms) if context else int(CANDLE_TIMEFRAME_MINUTES * 60 * 1000)
+        self.name = context.name if context else "3m"
         
         # symbol -> history of candles (list)
         self.spot_history: Dict[str, List[Candle]] = {}
@@ -40,6 +41,10 @@ class DataProcessor:
         history_store = self.spot_history if is_spot else self.perp_history
         
         minute_start_ms = (trade.timestamp // self.tf_ms) * self.tf_ms
+        
+        # TRACE LOGGING: Trade Ingestion
+        # (Disabled for safety - too high volume)
+        # logger.debug(f"[TRACE][{symbol}] Ingest Trade: {trade.price} @ {trade.quantity} ({trade.source})")
         
         closed_candle = None
         
@@ -121,6 +126,10 @@ class DataProcessor:
             candle.spot_cvd += delta
         elif trade.source == 'perp':
             candle.perp_cvd += delta
+            
+        # TRACE LOGGING: Candle Update
+        # (Disabled for safety - too high volume)
+        # logger.debug(f"[TRACE][{candle.symbol}] Candle Update: C={candle.close} V={candle.volume} SCVD={candle.spot_cvd} PCVD={candle.perp_cvd}")
 
     # _add_to_history removed, logic moved inline to process_trade for separate streams
 

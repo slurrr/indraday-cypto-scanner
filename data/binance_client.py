@@ -4,7 +4,7 @@ import time
 import random
 import websocket
 from typing import Callable, List, Dict, Optional
-from config.settings import BINANCE_SPOT_WS_URL, BINANCE_PERP_WS_URL, CANDLE_TIMEFRAME_MINUTES
+from config.settings import BINANCE_SPOT_WS_URL, BINANCE_PERP_WS_URL, CANDLE_TIMEFRAME_MINUTES, PERP_SYMBOL_MAPPING
 from models.types import Trade, Candle, StatusSink
 from utils.logger import setup_logger
 import requests
@@ -34,6 +34,11 @@ class BinanceClient:
         # Gap Detection
         self.backfill_callback: Optional[Callable[[str, List[Trade]], None]] = None
         self.last_msg_time_ms = int(time.time() * 1000) # Initialize to now to avoid startup gap
+        
+        # Symbol Normalization (Reverse Mapping)
+        # Mapped (External) -> Internal (Spot)
+        self.reverse_perp_mapping = {v: k for k, v in PERP_SYMBOL_MAPPING.items()}
+        
         logger.info(f"BinanceClient instance created: {id(self)}")
         
     def set_backfill_callback(self, callback: Callable[[str, List[Trade]], None]):
@@ -88,8 +93,12 @@ class BinanceClient:
             return
 
         try:
+            raw_symbol = data['s']
+            # Normalize to internal symbol
+            internal_symbol = self.reverse_perp_mapping.get(raw_symbol, raw_symbol)
+            
             trade = Trade(
-                symbol=data['s'],
+                symbol=internal_symbol,
                 price=float(data['p']),
                 quantity=float(data['q']),
                 timestamp=int(data['T']),
@@ -130,9 +139,20 @@ class BinanceClient:
         logger.info(f"Websocket opened: {ws.url}")
         if self.status_sink:
             self.status_sink.feed_connected()
+        
         # Subscribe to aggTrade for all symbols
         # IMPORTANT: Binance requires lowercase symbols for streams (e.g. btcusdt@aggTrade)
-        params = [f"{s.lower()}@aggTrade" for s in self.symbols]
+        
+        # Determine if this is the Perp WS or Spot WS to use correct symbols
+        is_perp = "fstream" in ws.url or "perp" in ws.url.lower() # Basic check based on URL constants
+        
+        if is_perp:
+             # Use mapped symbols for Perp
+             target_symbols = [PERP_SYMBOL_MAPPING.get(s, s) for s in self.symbols]
+        else:
+             target_symbols = self.symbols
+
+        params = [f"{s.lower()}@aggTrade" for s in target_symbols]
         subscribe_msg = {
             "method": "SUBSCRIBE",
             "params": params,
@@ -182,9 +202,14 @@ class BinanceClient:
 
         for index, symbol in enumerate(self.symbols):
             try:
+                # Resolve symbol for request (handle 1000PEPE etc for Perps)
+                req_symbol = symbol
+                if source == 'perp':
+                    req_symbol = PERP_SYMBOL_MAPPING.get(symbol, symbol)
+
                 # Interval 1m, Limit = lookback
                 params = {
-                    "symbol": symbol.upper(),
+                    "symbol": req_symbol.upper(),
                     "interval": interval,
                     "limit": lookback_bars
                 }
@@ -244,8 +269,14 @@ class BinanceClient:
             # We want the LAST closed candle. 
             # Requesting limit=2 ensures we get the just-closed one + the currently forming one.
             # We will take the second to last item.
+            
+            # Resolve symbol for request
+            req_symbol = symbol
+            if source == 'perp':
+                req_symbol = PERP_SYMBOL_MAPPING.get(symbol, symbol)
+            
             params = {
-                "symbol": symbol.upper(),
+                "symbol": req_symbol.upper(),
                 "interval": interval,
                 "limit": 2
             }
@@ -357,12 +388,18 @@ class BinanceClient:
         def _fetch_source(url_base: str, source_type: str):
             source_trades = []
             curr = start_time
+            
+            # Resolve symbol for request
+            req_symbol = symbol
+            if source_type == 'perp':
+                req_symbol = PERP_SYMBOL_MAPPING.get(symbol, symbol)
+            
             while True:
                 if curr >= end_time:
                     break
                 
                 params = {
-                    "symbol": symbol.upper(),
+                    "symbol": req_symbol.upper(),
                     "startTime": curr,
                     "endTime": end_time,
                     "limit": 1000

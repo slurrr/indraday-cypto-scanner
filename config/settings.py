@@ -8,6 +8,16 @@ SYMBOLS = [
     "XPLUSDT", "NEARUSDT", "PEPEUSDT", "WLFIUSDT", "LINEAUSDT",
 ]
 
+# Map internal scanner symbols (Spot) to Binance Perp symbols if different
+PERP_SYMBOL_MAPPING = {
+    "PEPEUSDT": "1000PEPEUSDT",
+    "SHIBUSDT": "1000SHIBUSDT",
+    "FLOKIUSDT": "1000FLOKIUSDT",
+    "BONKUSDT": "1000BONKUSDT",
+    "LUNCUSDT": "1000LUNCUSDT",
+    "RATSUSDT": "1000RATSUSDT",
+}
+
 # Timeframes
 TIMEFRAME_1M = "1m"
 TIMEFRAME_3M = "3m"
@@ -70,7 +80,7 @@ SCORING_WEIGHTS = {
 }
 
 # Logging
-LOG_LEVEL = "INFO"
+LOG_LEVEL = "DEBUG"
 LOG_FILE = "utils/scanner.log"
 DEBUG_LOG_FILE = "utils/debug_scanner.log"
 

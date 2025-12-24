@@ -123,6 +123,9 @@ class Alert:
     timeframe: str = "3m"
     spot_slope: float = 0.0
     perp_slope: float = 0.0
+    # Visual Fields
+    spot_slope_z: float = 0.0
+    perp_slope_z: float = 0.0
     # Debug fields
     atr_percentile: Optional[float] = None
     spot_cvd: Optional[float] = None
@@ -144,6 +147,8 @@ class ExecutionSignal:
     direction: str  # "LONG" or "SHORT"
     reason: str
     strength: float = 0.0
+    score: float = 0.0  # Calculated score (0-100), comparable to IGNITION scores
     
     def __str__(self):
-        return f"[EXEC] {self.symbol} {self.direction} @ {self.price} | {self.reason} ({self.strength:.1f})"
+        return f"[EXEC] {self.symbol} {self.direction} @ {self.price} | Score: {self.score:.1f} | {self.reason} (str:{self.strength:.1f})"
+

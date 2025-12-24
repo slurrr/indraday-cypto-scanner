@@ -20,6 +20,9 @@ import numpy as np
 import time
 from utils.snapshot_logger import write_snapshot
 from utils.event_snapshot import build_snapshot
+from utils.logger import setup_logger
+
+logger = setup_logger("Analyzer")
 
 
 class Analyzer:
@@ -338,31 +341,37 @@ class Analyzer:
         
         current = candles[-1]
         
-        # 1. Bias Check (Simple Price vs VWAP)
-        # In 15m, if price > VWAP -> Bullish, else Bearish (simplified)
+        # 1. Bias Check (Price vs VWAP)
+        # In 15m, if price > VWAP -> Bullish, else Bearish
         bias = "NEUTRAL"
-        if current.vwap:
-             if current.close > current.vwap:
+        vwap = current.vwap
+        price = current.close
+        
+        if vwap:
+             if price > vwap:
                  bias = "BULLISH"
-             elif current.close < current.vwap:
+             elif price < vwap:
                  bias = "BEARISH"
         
         # 2. Volatility Check
         vol_regime = "NORMAL"
-        if current.atr_percentile:
-             if current.atr_percentile < 20:
-                 vol_regime = "LOW"
-             elif current.atr_percentile > 80:
-                 vol_regime = "HIGH"
+        atr_pct = current.atr_percentile if current.atr_percentile is not None else 50.0
+        
+        if atr_pct < 20:
+             vol_regime = "LOW"
+        elif atr_pct > 80:
+             vol_regime = "HIGH"
         
         # 3. Allowed?
-        # For now, allow everything unless data is missing
         allowed = True
         reasons = []
         
-        if not current.vwap:
+        if not vwap:
              allowed = False
              reasons.append("Missing VWAP")
+             
+        # [DECISION_PROOF]
+        # logger.info(f"[DECISION_PROOF][{symbol}] Permission: Price={price:.4f} VWAP={vwap if vwap else 0:.4f} ATR%={atr_pct:.1f} -> Bias={bias} Allowed={allowed}")
         
         return PermissionSnapshot(
              symbol=symbol,
@@ -433,6 +442,15 @@ class Analyzer:
                     strength = min(body / (curr.atr if curr.atr else 1.0), 10.0)
 
         if signal_valid:
+             # Calculate proper EXEC score (IGNITION-like scale)
+             regime = self._determine_regime(candles_1m, curr)
+             exec_score = self._calculate_exec_score(
+                 direction=state.act_direction,
+                 current=curr,
+                 regime=regime,
+                 strength=strength
+             )
+             
              return [
                  ExecutionSignal(
                      symbol=symbol,
@@ -440,7 +458,8 @@ class Analyzer:
                      price=curr.close,
                      direction=state.act_direction, # Strictly inferred from state
                      reason=reason,
-                     strength=strength
+                     strength=strength,
+                     score=exec_score
                  )
              ]
              
@@ -468,35 +487,70 @@ class Analyzer:
         ):
             return FlowRegime.NEUTRAL
 
-        spot_slope, perp_slope = self._get_flow_slopes(current)
-        thresh = FLOW_SLOPE_THRESHOLD
+        # 1. Get Z-Scores for Significance/Consensus Logic
+        spot_z, perp_z = self._get_flow_slopes(current)
+        thresh = FLOW_SLOPE_THRESHOLD # 0.5
 
-        # If both are tiny, it's just noise
-        if abs(spot_slope) <= thresh and abs(perp_slope) <= thresh:
+        # If both Z-Scores are tiny (below threshold), it's noise
+        if abs(spot_z) <= thresh and abs(perp_z) <= thresh:
             return FlowRegime.NEUTRAL
 
-        spot_up = spot_slope > thresh
-        spot_down = spot_slope < -thresh
-        perp_up = perp_slope > thresh
-        perp_down = perp_slope < -thresh
+        spot_up = spot_z > thresh
+        spot_down = spot_z < -thresh
+        perp_up = perp_z > thresh
+        perp_down = perp_z < -thresh
 
-        # Same-direction consensus
+        # 2. Consensus Logic (Uses Z-Scores: "Are both significantly moving?")
         if spot_up and perp_up:
             return FlowRegime.BULLISH_CONSENSUS
         if spot_down and perp_down:
             return FlowRegime.BEARISH_CONSENSUS
 
-        # Opposite directions -> conflict
+        # 3. Conflict Logic (Uses Z-Scores: "Are both significantly fighting?")
         if (spot_up and perp_down) or (spot_down and perp_up):
             return FlowRegime.CONFLICT
 
-        # Dominance: whichever side has larger absolute slope
-        if abs(spot_slope) > abs(perp_slope):
+        # 4. Dominance Logic (Hybrid)
+        # We are here because at least one side is Active (Z > 0.5), but they are not in Consensus/Conflict.
+        # This implies either:
+        # a) One is Active, One is Passive (Z < 0.5)
+        # b) Both are Active but in different directions? (No, caught by Conflict)
+        # c) Both Active same direction? (No, caught by Consensus)
+        
+        # So it strictly means: One is Active (Z>0.5), One is Passive (Z<0.5).
+        
+        # User Feedback: "Coinglass says Perp Led" implies Raw Value is king for labeling.
+        # Just because Perp Z is low (due to high vol history) doesn't mean it's not dominating the price action.
+        
+        raw_spot = current.spot_cvd_slope if current.spot_cvd_slope is not None else 0.0
+        raw_perp = current.perp_cvd_slope if current.perp_cvd_slope is not None else 0.0
+        
+        # Compare Relative Raw Force
+        # Caution: Spot/Perp scales might inherently differ? 
+        # Usually they are both Quote Volume Delta (USDT). So they should be comparable.
+        
+        if abs(raw_spot) > abs(raw_perp):
             return FlowRegime.SPOT_DOMINANT
-        if abs(perp_slope) > abs(spot_slope):
-            result = FlowRegime.PERP_DOMINANT
-        else:
-            result = FlowRegime.NEUTRAL
+        elif abs(raw_perp) > abs(raw_spot):
+            return FlowRegime.PERP_DOMINANT
+            
+        # Fallback (Equal?)
+        result = FlowRegime.SPOT_DOMINANT if abs(spot_z) > abs(perp_z) else FlowRegime.PERP_DOMINANT
+
+        # TRACE LOGGING: Mean Regime Logic
+        # Throttled to prevent spam
+        current_time = int(time.time())
+        # Use a static-like dict on the method or class to track last log?
+        # A simple hack is logging active patterns: 
+        if not hasattr(self, "_last_log_time"):
+             self._last_log_time = {}
+        
+        last_log = self._last_log_time.get(current.symbol, 0)
+        if current_time > last_log:
+             logger.debug(f"[TRACE][{current.symbol}] Regime: {result.name} (SpotZ={spot_z:.2f} PerpZ={perp_z:.2f})")
+             self._last_log_time[current.symbol] = current_time
+        
+        return result
             
         # DEBUG: Log to console to show user life signs
         # Import logger at top or use printed logic if logger not available? 
@@ -931,6 +985,77 @@ class Analyzer:
         score = max(0.0, min(100.0, score))
         return score
 
+    def _calculate_exec_score(
+        self, direction: str, current: Candle, regime: FlowRegime, strength: float
+    ) -> float:
+        """
+        Calculate score for EXEC (1m execution) signals using the same scale as IGNITION.
+        
+        Args:
+            direction: "LONG" or "SHORT"
+            current: The 1m candle being analyzed
+            regime: Current flow regime
+            strength: Body/ATR ratio (0-10 range from analyze_execution)
+        
+        Returns:
+            Score in 0-100 range, comparable to IGNITION scores (typically 60-90+)
+        """
+        # Start with BASE_PATTERN (same as IGNITION)
+        score = float(SCORING_WEIGHTS.get("BASE_PATTERN", 0.0))  # 50
+        
+        # Flow Alignment Bonus
+        # Check if the regime supports the direction
+        spot_z, perp_z = self._get_flow_slopes(current)
+        
+        if direction == "LONG":
+            flow_aligned = (
+                regime == FlowRegime.BULLISH_CONSENSUS or
+                (regime == FlowRegime.SPOT_DOMINANT and spot_z > 0) or
+                (regime == FlowRegime.PERP_DOMINANT and perp_z > 0)
+            )
+            # Extra bonus for strong aligned z-scores
+            z_strength = max(spot_z, perp_z)
+        else:  # SHORT
+            flow_aligned = (
+                regime == FlowRegime.BEARISH_CONSENSUS or
+                (regime == FlowRegime.SPOT_DOMINANT and spot_z < 0) or
+                (regime == FlowRegime.PERP_DOMINANT and perp_z < 0)
+            )
+            # Extra bonus for strong aligned z-scores (magnitude)
+            z_strength = abs(min(spot_z, perp_z))
+        
+        if flow_aligned:
+            score += SCORING_WEIGHTS.get("FLOW_ALIGNMENT", 0.0)  # +20
+            # Additional z-score strength bonus (0-5 points for strong z > 1.0)
+            if z_strength > 1.0:
+                score += min(z_strength - 1.0, 1.0) * 5.0
+        elif regime in (FlowRegime.SPOT_DOMINANT, FlowRegime.PERP_DOMINANT):
+            # Partial context bonus even without perfect alignment
+            score += SCORING_WEIGHTS.get("CONTEXT", 0.0) * 0.5  # +7.5
+        elif regime == FlowRegime.NEUTRAL:
+            # Penalize neutral flow
+            score -= 5.0
+        elif regime == FlowRegime.CONFLICT:
+            # Conflict is risky but not disqualifying if we passed flow gates
+            pass  # No bonus, no penalty
+        
+        # Volatility Contribution
+        if current.atr_percentile is not None:
+            if current.atr_percentile > 80:
+                score += SCORING_WEIGHTS.get("VOLATILITY", 0.0)  # +15
+            elif current.atr_percentile > 50:
+                score += SCORING_WEIGHTS.get("VOLATILITY", 0.0) * 0.5  # +7.5
+        
+        # Magnitude/Strength Contribution (the original body/ATR ratio)
+        # strength is 0-10 range, we'll give up to 10 points for strong moves
+        if strength > 0:
+            magnitude_bonus = min(strength, 5.0) * 2.0  # 0-10 points
+            score += magnitude_bonus
+        
+        # Clamp and floor
+        score = max(0.0, min(100.0, score))
+        return score
+
     # ------------------------------------------------------------------
     # Alert factory
     # ------------------------------------------------------------------
@@ -945,6 +1070,8 @@ class Analyzer:
         direction: Optional[str] = None
     ) -> Alert:
         tf_name = context.name if context else "3m"
+        # USE RAW SLOPES for UI Display (Matches Chart Intuition)
+        # Logic uses Z-Scores, but Humans check charts.
         spot_slope = candle.spot_cvd_slope if candle.spot_cvd_slope is not None else 0.0
         perp_slope = candle.perp_cvd_slope if candle.perp_cvd_slope is not None else 0.0
         
@@ -961,6 +1088,9 @@ class Analyzer:
             direction=direction,
             spot_slope=float(spot_slope),
             perp_slope=float(perp_slope),
+            # Visual Fields (Z-Scores)
+            spot_slope_z=float(candle.spot_cvd_slope_z if candle.spot_cvd_slope_z is not None else 0.0),
+            perp_slope_z=float(candle.perp_cvd_slope_z if candle.perp_cvd_slope_z is not None else 0.0),
             # Debug
             atr_percentile=candle.atr_percentile,
             spot_cvd=candle.spot_cvd,

@@ -4,6 +4,9 @@ from typing import List, Optional
 from models.types import Candle, TimeframeContext
 from config.settings import ATR_WINDOW, ATR_PERCENTILE_WINDOW, SLOPE_Z_SCORE_WINDOW
 from datetime import datetime, timezone
+from utils.logger import setup_logger
+
+logger = setup_logger("Indicators")
 
 # --- Core Math Helpers ---
 
@@ -21,6 +24,12 @@ def _calculate_slope_tail(series: List[float], period: int = 5) -> float:
     # Fast linear regression: slope = cov(x,y) / var(x)
     # simple polyfit degree 1
     slope = np.polyfit(x, y, 1)[0]
+    
+    # [MATH PROOF] - Log the inputs for verification
+    # Only Log for BTCUSDT to avoid flood? We don't have symbol context here easily.
+    # We will log it if the values are large (likely BTC/ETH) or just sample it.
+    # Actually, main.py logs the 'CumWindow' now. 
+    # But let's verify the LINEAR REGRESSION output specifically.
     return float(slope)
 
 def _calculate_zscore(last_val: float, history: List[float]) -> float:
@@ -35,7 +44,10 @@ def _calculate_zscore(last_val: float, history: List[float]) -> float:
     if std == 0:
         return 0.0
         
-    return float((last_val - mean) / std)
+    z = (last_val - mean) / std
+    # [MATH PROOF]
+    # logger.debug(f"[MATH_PROOF] Z-Score: Val={last_val:.4f} Mean={mean:.4f} Std={std:.4f} -> Z={z:.4f}")
+    return float(z)
 
 # --- Full Calculation (Initialization) ---
 
@@ -168,6 +180,12 @@ def update_candle_at_index(history: List[Candle], index: int, context: Optional[
     curr = history[index]
     prev = history[index-1] if index > 0 else None
     
+    # Defensive: Ensure prev has cumulative sums initialized (might be 0.0 or None)
+    prev_cum_pv = (prev.cum_pv if prev and prev.cum_pv is not None else 0.0)
+    prev_cum_vol = (prev.cum_vol if prev and prev.cum_vol is not None else 0.0)
+    prev_cum_spot_cvd = (prev.cum_spot_cvd if prev and prev.cum_spot_cvd is not None else 0.0)
+    prev_cum_perp_cvd = (prev.cum_perp_cvd if prev and prev.cum_perp_cvd is not None else 0.0)
+    
     # 1. VWAP (Incremental)
     typical_price = (curr.high + curr.low + curr.close) / 3.0
     pv = typical_price * curr.volume
@@ -187,15 +205,15 @@ def update_candle_at_index(history: List[Candle], index: int, context: Optional[
         curr.cum_pv = pv
         curr.cum_vol = curr.volume
     else:
-        curr.cum_pv = prev.cum_pv + pv
-        curr.cum_vol = prev.cum_vol + curr.volume
+        curr.cum_pv = prev_cum_pv + pv
+        curr.cum_vol = prev_cum_vol + curr.volume
         
     curr.vwap = curr.cum_pv / curr.cum_vol if curr.cum_vol > 0 else 0.0
     
     # 2. CVD (Incremental)
     # These are strictly cumulative sums
-    curr.cum_spot_cvd = (prev.cum_spot_cvd if prev else 0.0) + curr.spot_cvd
-    curr.cum_perp_cvd = (prev.cum_perp_cvd if prev else 0.0) + curr.perp_cvd
+    curr.cum_spot_cvd = prev_cum_spot_cvd + (curr.spot_cvd if curr.spot_cvd is not None else 0.0)
+    curr.cum_perp_cvd = prev_cum_perp_cvd + (curr.perp_cvd if curr.perp_cvd is not None else 0.0)
     
     # 3. ATR (Incremental Calculation on the fly)
     
@@ -273,6 +291,11 @@ def update_candle_at_index(history: List[Candle], index: int, context: Optional[
         curr.atr_percentile = (count_lte / len(atr_window)) * 100.0
     else:
         curr.atr_percentile = 50.0
+
+    # TRACE LOGGING: Indicators Calculated
+    # logger.debug(f"[TRACE][{curr.symbol}] Indicators: VWAP={curr.vwap:.2f} ATR={curr.atr:.4f} "
+    #              f"SpotSlope={curr.spot_cvd_slope:.2f} (Z={curr.spot_cvd_slope_z:.2f}) "
+    #              f"PerpSlope={curr.perp_cvd_slope:.2f} (Z={curr.perp_cvd_slope_z:.2f})")
 
 def update_latest_candle(history: List[Candle], context: Optional["TimeframeContext"] = None, atr_period: int = ATR_WINDOW):
     """

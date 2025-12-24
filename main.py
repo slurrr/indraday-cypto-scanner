@@ -1,6 +1,13 @@
+import os
+import sys
+
+# --- PRE-IMPORT CONFIGURATION ---
+INSTANCE_ID = os.environ.get("SCANNER_INSTANCE", os.getpid())
+# Set the log file for all components to match this instance
+os.environ["SCANNER_LOG_FILE"] = f"utils/scanner_{INSTANCE_ID}.log"
+
 from config.settings import ANALYZER_DEBUG
 import json
-import sys, os
 from typing import List
 from rich.console import Console
 from rich.live import Live
@@ -13,12 +20,13 @@ REAL_STDOUT = sys.__stdout__
 # Create Rich console bound to REAL terminal output
 console = Console(file=REAL_STDOUT, soft_wrap=True)
 
-from ui.console import ConsoleUI, UIStatus  # import AFTER console exists
-
 import time
 import signal
 import queue
 import threading
+
+# Core imports (Delayed until after env var set)
+from ui.console import ConsoleUI, UIStatus
 from config.settings import SYMBOLS
 from data.binance_client import BinanceClient
 from concurrent.futures import ThreadPoolExecutor
@@ -28,9 +36,7 @@ from core.indicators import calculate_indicators_full, update_latest_candle, upd
 from models.types import Trade, Alert, TimeframeContext, State, StateSnapshot, ExecutionType
 from utils.logger import setup_logger
 
-INSTANCE_ID = os.environ.get("SCANNER_INSTANCE", os.getpid())
-
-LOG_FILE = f"utils/scanner_{INSTANCE_ID}.log"
+LOG_FILE = os.environ["SCANNER_LOG_FILE"]
 DEBUG_LOG_FILE = f"utils/debug_scanner_{INSTANCE_ID}.log"
 
 logger = setup_logger(
@@ -148,6 +154,14 @@ def main():
                     else:
                         history = []
 
+                    # CRITICAL FIX: Validate indicator integrity on slice before analysis
+                    # If any closed candles are missing indicators, repair the chain
+                    if history and len(history) >= 30:
+                        missing_count = sum(1 for c in history[-30:] if c.atr_percentile is None)
+                        if missing_count > 0:
+                            logger.warning(f"INDICATOR_REPAIR: {symbol} has {missing_count}/30 candles missing atr_percentile. Running full recalc.")
+                            calculate_indicators_full(history, context=tf_context)
+
                     # 1a. Inject ACTIVE Spot candle
                     # This is critical. Without this, we analyze 3m-old data.
                     if symbol in data_processor.active_spot_candles:
@@ -161,21 +175,104 @@ def main():
                              import copy
                              active_spot_snap = copy.copy(active_spot)
                              history.append(active_spot_snap)
-                    
+                             
                     # 2. Update Indicators (Incremental - FAST)
                     # This will calculate slope/vwap on the just-appended active tip
                     update_latest_candle(history, context=tf_context)
+
+                    # TRACE LOGGING: Spot Injection (Throttled)
+                    # Moved after update_latest_candle to show calculated slopes
+                    if symbol in data_processor.active_spot_candles and history:
+                         now_sec = int(time.time())
+                         # We can use a module-level dict for throttling since we are in a closure/worker
+                         if not hasattr(analysis_worker, "_last_log"): analysis_worker._last_log = {}
+                         
+                         if now_sec > analysis_worker._last_log.get(f"{symbol}_spot", 0):
+                              last_s = history[-1]
+                              # Extract last 5 cumulative CVDs for verification
+                              cvd_window = [round(c.cum_spot_cvd, 1) for c in history[-5:]] if hasattr(last_s, 'cum_spot_cvd') else []
+                              # logger.debug(f"[TRACE][{symbol}] Injected Active Spot: C={last_s.close} SCVD={last_s.spot_cvd} CumWindow={cvd_window} Slope={last_s.spot_cvd_slope:.3f}")
+                              analysis_worker._last_log[f"{symbol}_spot"] = now_sec
                     
                     # 3. Analyze
                     current_state = symbol_states[symbol]
                     # Fetch Perp history for flow context
-                    perp_history = data_processor.get_history(symbol, source='perp')
+                    raw_perp_history = data_processor.get_history(symbol, source='perp')
+                    # Create copy to allow injection
+                    if raw_perp_history:
+                        perp_history = list(raw_perp_history[-HISTORY_COPY_DEPTH:])
+                    else:
+                        perp_history = []
+                        
+                    # 3b. Inject ACTIVE Perp Candle
+                    # Same logic as Spot: we need the live flow!
+                    if symbol in data_processor.active_perp_candles:
+                        active_perp = data_processor.active_perp_candles[symbol]
+                        # Ensure continuity
+                        if not perp_history or active_perp.timestamp > perp_history[-1].timestamp:
+                            import copy
+                            active_perp_snap = copy.copy(active_perp)
+                            perp_history.append(active_perp_snap)
+                    
+                    # 3c. Update Indicators for Perp Tip
+                    # Vital to get the slope on the active candle
+                    if perp_history:
+                         # We can't use update_latest_candle easily if the previous candles don't have cumulative sums
+                         # stored?
+                         # DataProcessor.get_history returns candles that DO have cumulative sums if they were 
+                         # initialized/updated properly?
+                         # Yes, init_hybrid and reconcile_candle update them.
+                         # But active_perp is raw.
+                         # update_latest_candle handles incremental update using prev candle.
+                         update_latest_candle(perp_history, context=tf_context)
+                         
+                         # TRACE LOGGING: Perp Injection (Throttled)
+                         now_sec = int(time.time())
+                         if not hasattr(analysis_worker, "_last_log"): analysis_worker._last_log = {}
+                         
+                         if now_sec > analysis_worker._last_log.get(f"{symbol}_perp", 0):
+                             last_p = perp_history[-1]
+                             # Extract last 5 cumulative PERP CVDs
+                             cvd_window_p = [round(c.cum_perp_cvd, 1) for c in perp_history[-5:]] if hasattr(last_p, 'cum_perp_cvd') else []
+                             logger.debug(f"[TRACE][{symbol}] Injected Active Perp: C={last_p.close} SCVD={last_p.spot_cvd} PCVD={last_p.perp_cvd} CumWindow={cvd_window_p} Slope={last_p.perp_cvd_slope:.3f}")
+                             analysis_worker._last_log[f"{symbol}_perp"] = now_sec
                     
                     # DEBUG: Trace history length
                     if len(history) < 30:
                         logger.warning(f"DEBUG_HISTORY: {symbol} has {len(history)} bars (Insufficient!). ActiveSpot found: {symbol in data_processor.active_spot_candles}")
 
+                    # --- CRITICAL FIX: Live 15m Permission Update ---
+                    # Update permission NOW using the active 15m candle so 3m analysis sees fresh Bias.
+                    try:
+                        # 1. Fetch 15m History (Spot)
+                        raw_15m = data_processor_15m.get_history(symbol, source='spot')
+                        hist_15m = list(raw_15m[-100:]) if raw_15m else [] # Copy last 100
+                        
+                        # 2. Inject Active 15m Candle
+                        if symbol in data_processor_15m.active_spot_candles:
+                             active_15m = data_processor_15m.active_spot_candles[symbol]
+                             # Ensure continuity
+                             if not hist_15m or active_15m.timestamp > hist_15m[-1].timestamp:
+                                 import copy
+                                 active_15m_snap = copy.copy(active_15m)
+                                 hist_15m.append(active_15m_snap)
+                                 
+                        # 3. Update Indicators for the Tip (VWAP needed for Permission)
+                        if hist_15m:
+                             update_latest_candle(hist_15m, context=tf_context_15m)
+                             
+                             # 4. Analyze & Update State
+                             perm_snapshot = analyzer.analyze_permission(symbol, hist_15m, context=tf_context_15m)
+                             
+                             # Update the SHARED state object (thread-safe enough as we are in the worker)
+                             # Note: analyze() below uses 'current_state' referentially, so it WILL see this update!
+                             current_state.permission = perm_snapshot
+                             
+                    except Exception as e:
+                        logger.error(f"Error updating live 15m permission for {symbol}: {e}")
+
                     alerts = analyzer.analyze(symbol, history, context=tf_context, state=current_state, perp_candles=perp_history)
+
                     
                     # Debug logic
                     if ANALYZER_DEBUG:
@@ -388,7 +485,7 @@ def main():
                     candle_timestamp=sig.timestamp,
                     symbol=sig.symbol,
                     pattern=ExecutionType.EXEC,
-                    score=min(sig.strength * 10.0, 100.0), # normalize strength?
+                    score=sig.score,  # Use properly calculated EXEC score (IGNITION-like scale)
                     flow_regime=analyzer._determine_regime(history, history[-1]), # roughly
                     price=sig.price,
                     message=f"{sig.direction}: {sig.reason}",
