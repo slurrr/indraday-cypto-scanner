@@ -50,6 +50,23 @@ debug_logger = setup_logger(
     level="DEBUG",
 )
 
+def format_candle_log(c) -> str:
+    """Format candle data for detailed logging."""
+    vwap = f"{c.vwap:.4f}" if c.vwap else "-"
+    atr = f"{c.atr:.4f}" if c.atr else "-"
+    atr_pct = f"{c.atr_percentile:.1f}" if c.atr_percentile is not None else "-"
+    spot_slope = f"{c.spot_cvd_slope:.3f}" if c.spot_cvd_slope is not None else "-"
+    perp_slope = f"{c.perp_cvd_slope:.3f}" if c.perp_cvd_slope is not None else "-"
+    spot_z = f"{c.spot_cvd_slope_z:.2f}" if c.spot_cvd_slope_z is not None else "-"
+    perp_z = f"{c.perp_cvd_slope_z:.2f}" if c.perp_cvd_slope_z is not None else "-"
+    return (
+        f"Candle[ts={c.timestamp} O={c.open:.4f} H={c.high:.4f} L={c.low:.4f} C={c.close:.4f} "
+        f"VWAP={vwap} ATR={atr} ATR%={atr_pct} "
+        f"SpotCVD={c.spot_cvd:.1f} PerpCVD={c.perp_cvd:.1f} "
+        f"SpotSlope={spot_slope} PerpSlope={perp_slope} "
+        f"SpotZ={spot_z} PerpZ={perp_z}]"
+    )
+
 def main():
     logger.info("Starting Intraday Flow Scanner...")
 
@@ -125,6 +142,8 @@ def main():
         for alert in new_unique_alerts:
             ui.add_alert(alert)
             logger.info(f"ALERT: {alert}")
+        
+        return new_unique_alerts
 
     # --- Analysis Worker Implementation ---
     analysis_queue = queue.Queue()
@@ -278,8 +297,11 @@ def main():
                     if ANALYZER_DEBUG:
                         dbg = analyzer.debug_analyze(symbol, history)
                         for pat, result in dbg["patterns"].items():
-                            if not result["ok"] and any(k in result["reason"].lower() for k in ["not", "missing", "near"]):
+                            if not result["ok"] and any(k in result["reason"].lower() for k in ["not", "missing", "near", "flow"]):
                                 debug_logger.debug(f"[DEBUG][{symbol}] Almost {pat}: {result['reason']}")
+                                # Log candle data for almost-alerts
+                                if history:
+                                    debug_logger.debug(f"[DEBUG][{symbol}] {format_candle_log(history[-1])}")
 
                     # 4. Handle Alerts
                     if alerts:
@@ -287,7 +309,12 @@ def main():
                             f"[DEBUG_BARS] {symbol} 3m bars={len(history)} "
                             f"ready={len(history) >= 120}"
                         )
-                        handle_alerts(alerts)
+                        new_alerts = handle_alerts(alerts)
+                        # Log candle data for each new alert
+                        if new_alerts and history:
+                            candle = history[-1]
+                            for a in new_alerts:
+                                logger.info(f"ALERT_CANDLE: {a.symbol}|{a.pattern.value} {format_candle_log(candle)}")
                         
             except Exception as e:
                 logger.error(f"Error in analysis worker for {symbol}: {e}")
@@ -389,7 +416,11 @@ def main():
             debug_logger.debug(
                 f"[DEBUG_BARS] {symbol} 3m bars={len(history)} ready={len(history) >= 120}"
             )
-            handle_alerts(reconciled_alerts)
+            new_alerts = handle_alerts(reconciled_alerts)
+            # Log candle data for reconciled alerts
+            if new_alerts and history:
+                for a in new_alerts:
+                    logger.info(f"ALERT_CANDLE: {a.symbol}|{a.pattern.value} {format_candle_log(history[-1])}")
 
     def analyze_15m(symbol: str, history: List, context: TimeframeContext):
         perm_snapshot = analyzer.analyze_permission(symbol, history, context=context)
@@ -499,7 +530,10 @@ def main():
                     spot_cvd=history[-1].spot_cvd,
                     perp_cvd=history[-1].perp_cvd
                 )
-                handle_alerts([alert])
+                new_alerts = handle_alerts([alert])
+                # Log candle data for execution signals
+                if new_alerts and history:
+                    logger.info(f"ALERT_CANDLE: {sig.symbol}|EXEC {format_candle_log(history[-1])}")
 
 
 
@@ -569,8 +603,12 @@ def main():
     # Initialize History with Hybrid Approach (Klines + AggTrades)
     try:
         now_ms = int(time.time() * 1000)
+        # DETERMINISTIC STARTUP: Floor to 3m candle boundary
+        # This ensures multiple instances started within the same 3-minute window
+        # will fetch identical data and have identical initial states.
+        aligned_now_ms = now_ms - (now_ms % tf_context.interval_ms)
         warmup_duration_ms = 20 * 60 * 1000 # 20 minutes warmup for flow
-        kline_end_ms = now_ms - warmup_duration_ms
+        kline_end_ms = aligned_now_ms - warmup_duration_ms
         
         def init_hybrid(proc, ctx, lookback):
             # 1. Bulk Klines (Fast) - Fetch BOTH Spot and Perp
@@ -602,7 +640,7 @@ def main():
             if h_map_spot: # Only backfill if we have symbols
                 for sym in h_map_spot.keys():
                     try:
-                        trades = client.fetch_agg_trades(sym, start_time=kline_end_ms, end_time=now_ms)
+                        trades = client.fetch_agg_trades(sym, start_time=kline_end_ms, end_time=aligned_now_ms)
                         proc.fill_gap_from_trades(sym, trades)
                     except Exception as e:
                         logger.error(f"[{ctx.name}] Backfill failed for {sym}: {e}")
