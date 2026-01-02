@@ -100,8 +100,9 @@ def calculate_indicators_full(candles: List[Candle], atr_period: int = ATR_WINDO
     
     vwaps = df['vwap'].fillna(0).tolist()
     atrs = df['atr'].fillna(0).tolist()
-    spot_cum = df['cum_spot_cvd'].tolist()
-    perp_cum = df['cum_perp_cvd'].tolist()
+    # Use per-candle CVD deltas for slope calculation (deterministic across instances)
+    spot_cvd_deltas = df['spot_cvd'].fillna(0).tolist()
+    perp_cvd_deltas = df['perp_cvd'].fillna(0).tolist()
     
     # Pre-populate objects
     for i, row in df.iterrows():
@@ -126,8 +127,9 @@ def calculate_indicators_full(candles: List[Candle], atr_period: int = ATR_WINDO
         
         c = candles[i]
         c.vwap_slope = _calculate_slope_tail(vwaps[start:i+1])
-        c.spot_cvd_slope = _calculate_slope_tail(spot_cum[start:i+1])
-        c.perp_cvd_slope = _calculate_slope_tail(perp_cum[start:i+1])
+        # Use per-candle CVD deltas for deterministic slope calculation
+        c.spot_cvd_slope = _calculate_slope_tail(spot_cvd_deltas[start:i+1])
+        c.perp_cvd_slope = _calculate_slope_tail(perp_cvd_deltas[start:i+1])
         
         spot_slopes_history.append(c.spot_cvd_slope)
         perp_slopes_history.append(c.perp_cvd_slope)
@@ -261,11 +263,12 @@ def update_candle_at_index(history: List[Candle], index: int, context: Optional[
     vwap_window = [c.vwap for c in history[s_start : index+1] if c.vwap is not None]
     curr.vwap_slope = _calculate_slope_tail(vwap_window)
     
-    # CVD Slopes
-    spot_cvd_window = [c.cum_spot_cvd for c in history[s_start : index+1]] 
+    # CVD Slopes - Use per-candle deltas for deterministic calculation
+    # This ensures identical candle data produces identical slopes regardless of startup timing
+    spot_cvd_window = [c.spot_cvd if c.spot_cvd is not None else 0.0 for c in history[s_start : index+1]] 
     curr.spot_cvd_slope = _calculate_slope_tail(spot_cvd_window)
 
-    perp_cvd_window = [c.cum_perp_cvd for c in history[s_start : index+1]]
+    perp_cvd_window = [c.perp_cvd if c.perp_cvd is not None else 0.0 for c in history[s_start : index+1]]
     curr.perp_cvd_slope = _calculate_slope_tail(perp_cvd_window)
     
     # 5. Z-Score Normalization (Incremental)

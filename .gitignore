@@ -33,7 +33,7 @@ wheels/
 *.egg
 
 # Logs
-*.log
+*.log*
 debug*
 
 #other

@@ -6,6 +6,7 @@ SYMBOLS = [
     "XRPUSDT", "ADAUSDT", "ONDOUSDT", "LTCUSDT", "AVAXUSDT",
     "XLMUSDT", "ZECUSDT", "FILUSDT", "AAVEUSDT", "LINKUSDT",
     "XPLUSDT", "NEARUSDT", "PEPEUSDT", "WLFIUSDT", "LINEAUSDT",
+    "PUMPUSDT", "SHIBUSDT", "FLOKIUSDT", "BONKUSDT", "LUNCUSDT",
 ]
 
 # Map internal scanner symbols (Spot) to Binance Perp symbols if different
