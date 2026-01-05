@@ -94,5 +94,8 @@ FLOW_SLOPE_THRESHOLD = 0.5 # Threshold in Sigma. 0.5 = Top ~30% (Mild). 1.0 = Mo
 # Debug mode for analyzer
 ANALYZER_DEBUG = True   # Set False for production
 
+# Feature Toggles
+ENABLE_EXEC_ALERTS = False  # Set True to enable 1m EXEC alerts, False to pause them
+
 # UI Configuration
 ENABLE_STATE_MONITOR = True # Toggle to show/hide the State Monitor panel

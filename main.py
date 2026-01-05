@@ -6,7 +6,7 @@ INSTANCE_ID = os.environ.get("SCANNER_INSTANCE", os.getpid())
 # Set the log file for all components to match this instance
 os.environ["SCANNER_LOG_FILE"] = f"utils/scanner_{INSTANCE_ID}.log"
 
-from config.settings import ANALYZER_DEBUG
+from config.settings import ANALYZER_DEBUG, ENABLE_EXEC_ALERTS
 import json
 from typing import List
 from rich.console import Console
@@ -444,6 +444,10 @@ def main():
         logger.info(f"[15m] Permission Snapshot for {symbol}: {perm_snapshot} -> State Updated")
 
     def analyze_1m(symbol: str, history: List, context: TimeframeContext):
+        # Early exit if EXEC alerts are disabled
+        if not ENABLE_EXEC_ALERTS:
+            return
+            
         # Retrieve state
         state = symbol_states.get(symbol)
         
